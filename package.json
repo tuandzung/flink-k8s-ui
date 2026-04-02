@@ -6,13 +6,8 @@
   "scripts": {
     "start": "cargo run --manifest-path apps/api-rs/Cargo.toml",
     "dev": "FIXTURE_MODE=true cargo run --manifest-path apps/api-rs/Cargo.toml",
-    "start:node": "node apps/api/src/server.js",
-    "dev:node": "FIXTURE_MODE=true node apps/api/src/server.js",
     "build": "node scripts/build.mjs",
-    "build:node": "node scripts/build.mjs --node-only",
     "ci:smoke": "node scripts/ci-smoke.mjs",
-    "test": "node --test",
-    "test:parity": "node --test tests/e2e/rustParity.test.js",
-    "test:e2e": "node --test tests/e2e/*.test.js"
+    "test": "node --test tests/web/*.test.js"
   }
 }

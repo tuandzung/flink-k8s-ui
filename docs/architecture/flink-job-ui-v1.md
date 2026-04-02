@@ -14,10 +14,10 @@ The repo was greenfield, so the implementation optimizes for:
 
 ## Components
 ### Backend
-- `apps/api/src/server.js` — HTTP server and static asset host
-- `apps/api/src/data/jobsService.js` — cached job aggregation
-- `apps/api/src/adapters/k8s/` — Kubernetes reads + normalization
-- `apps/api/src/adapters/flink/` — optional Flink REST enrichment
+- `apps/api-rs/src/http/router.rs` — HTTP router, metrics, and static asset serving
+- `apps/api-rs/src/service/jobs_service.rs` — cached job aggregation
+- `apps/api-rs/src/adapters/k8s.rs` — Kubernetes reads + normalization inputs
+- `apps/api-rs/src/adapters/flink.rs` — optional Flink REST enrichment
 
 ### Frontend
 - `apps/web/public/index.html` — shell
@@ -41,7 +41,7 @@ The repo was greenfield, so the implementation optimizes for:
 Raw status is still preserved in the details view for troubleshooting.
 
 ## Configuration
-- `FIXTURE_MODE=true` uses `apps/api/src/fixtures/jobs.json`
+- `FIXTURE_MODE=true` uses `fixtures/jobs.json`
 - `FLINK_UI_CLUSTERS_JSON` supports explicit cluster config
 - `K8S_*` env vars support a single-cluster deployment
 

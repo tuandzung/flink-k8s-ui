@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use reqwest::{Client, Url};
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::domain::job::Job;
 
@@ -29,7 +29,10 @@ pub async fn enrich_jobs(jobs: Vec<Job>, request_timeout_ms: u64) -> Vec<Job> {
 
 async fn enrich_job(client: &Client, job: Job) -> Job {
     let Some(native_ui_url) = &job.native_ui_url else {
-        return with_warning(job, "Flink REST enrichment unavailable: no JobManager URL".to_owned());
+        return with_warning(
+            job,
+            "Flink REST enrichment unavailable: no JobManager URL".to_owned(),
+        );
     };
 
     let overview_url = match Url::parse(native_ui_url).and_then(|url| url.join("/jobs/overview")) {
@@ -83,7 +86,10 @@ fn merge_overview(mut job: Job, payload: Value) -> Job {
         .cloned();
 
     let Some(candidate) = candidate else {
-        return with_warning(job, "Flink REST enrichment returned no matching job".to_owned());
+        return with_warning(
+            job,
+            "Flink REST enrichment returned no matching job".to_owned(),
+        );
     };
 
     job.flink_job_id = candidate
@@ -217,6 +223,93 @@ mod tests {
         mock.shutdown();
     }
 
+    #[tokio::test]
+    async fn enrich_jobs_warns_when_no_matching_job_is_returned() {
+        let mock = start_mock_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({
+              "jobs": [{
+                "jid": "job-999",
+                "name": "another-job",
+                "state": "FAILED"
+              }]
+            }),
+        )])
+        .await;
+
+        let jobs = enrich_jobs(
+            vec![Job {
+                id: "demo:analytics:FlinkDeployment:orders-stream".to_owned(),
+                cluster: "demo".to_owned(),
+                namespace: "analytics".to_owned(),
+                kind: "FlinkDeployment".to_owned(),
+                resource_name: "orders-stream".to_owned(),
+                job_name: "orders-stream".to_owned(),
+                status: "running".to_owned(),
+                health: "healthy".to_owned(),
+                raw_status: "READY".to_owned(),
+                flink_version: None,
+                deployment_mode: None,
+                last_updated_at: None,
+                started_at: None,
+                flink_job_id: None,
+                native_ui_url: Some(format!("{}/orders-stream/", mock.base_url)),
+                warnings: Vec::new(),
+                details: json!({}),
+            }],
+            500,
+        )
+        .await;
+
+        assert_eq!(
+            jobs[0].warnings,
+            vec!["Flink REST enrichment returned no matching job".to_owned()]
+        );
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn enrich_jobs_warns_when_flink_rest_returns_an_error() {
+        let mock = start_mock_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+              "error": "upstream unavailable"
+            }),
+        )])
+        .await;
+
+        let jobs = enrich_jobs(
+            vec![Job {
+                id: "demo:analytics:FlinkDeployment:orders-stream".to_owned(),
+                cluster: "demo".to_owned(),
+                namespace: "analytics".to_owned(),
+                kind: "FlinkDeployment".to_owned(),
+                resource_name: "orders-stream".to_owned(),
+                job_name: "orders-stream".to_owned(),
+                status: "running".to_owned(),
+                health: "healthy".to_owned(),
+                raw_status: "READY".to_owned(),
+                flink_version: None,
+                deployment_mode: None,
+                last_updated_at: None,
+                started_at: None,
+                flink_job_id: None,
+                native_ui_url: Some(format!("{}/orders-stream/", mock.base_url)),
+                warnings: Vec::new(),
+                details: json!({}),
+            }],
+            500,
+        )
+        .await;
+
+        assert!(jobs[0].warnings[0].starts_with("Flink REST enrichment failed: Flink REST 503:"));
+
+        mock.shutdown();
+    }
+
     struct MockServer {
         base_url: String,
         task: JoinHandle<()>,
@@ -238,8 +331,11 @@ mod tests {
                     let path = uri.path().to_owned();
                     let maybe = shared.iter().find(|(candidate, _, _)| candidate == &path);
                     match maybe {
-                        Some((_, status, payload)) => (*status, Json(payload.clone())).into_response(),
-                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response(),
+                        Some((_, status, payload)) => {
+                            (*status, Json(payload.clone())).into_response()
+                        }
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
                     }
                 }
             }
@@ -247,9 +343,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have local address");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
         });
 
         MockServer {

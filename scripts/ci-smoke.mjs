@@ -56,9 +56,6 @@ async function main() {
   console.log('==> npm test');
   await run('npm', ['test']);
 
-  console.log('==> npm run test:parity');
-  await run('npm', ['run', 'test:parity']);
-
   console.log('==> docker build');
   await run('docker', ['build', '-f', 'deploy/api/Dockerfile', '-t', imageTag, '.']);
 

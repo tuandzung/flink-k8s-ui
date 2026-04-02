@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tokio::sync::RwLock;
 
 use crate::adapters::fixture::load_fixture_jobs;
@@ -98,4 +98,70 @@ fn sort_jobs(mut jobs: Vec<Job>) -> Vec<Job> {
             .then_with(|| left.resource_name.cmp(&right.resource_name))
     });
     jobs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobsService;
+    use crate::config::AppConfig;
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate should be nested in apps/")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
+    fn fixture_config() -> AppConfig {
+        AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            root_dir: workspace_root(),
+            fixture_mode: true,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            clusters: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn jobs_service_returns_fixture_rows() {
+        let service = JobsService::new(fixture_config());
+        let jobs = service
+            .list_jobs(true)
+            .await
+            .expect("fixture jobs should load");
+
+        assert_eq!(jobs.len(), 4);
+        assert_eq!(jobs[0].cluster, "demo");
+    }
+
+    #[tokio::test]
+    async fn jobs_service_can_fetch_a_job_by_id() {
+        let service = JobsService::new(fixture_config());
+        let job = service
+            .get_job_by_id("prod:risk:FlinkDeployment:risk-detector")
+            .await
+            .expect("job lookup should succeed")
+            .expect("job should exist");
+
+        assert_eq!(job.resource_name, "risk-detector");
+        assert_eq!(job.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn jobs_service_can_fetch_a_job_by_locator() {
+        let service = JobsService::new(fixture_config());
+        let job = service
+            .get_job_by_locator("demo", "analytics", "FlinkDeployment", "orders-stream")
+            .await
+            .expect("job lookup should succeed")
+            .expect("job should exist");
+
+        assert_eq!(job.job_name, "orders-stream");
+    }
 }

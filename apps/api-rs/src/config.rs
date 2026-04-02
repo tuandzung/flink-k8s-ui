@@ -36,19 +36,20 @@ pub struct ClusterConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let root_dir = detect_root_dir()?;
-        let configured_clusters = normalize_clusters(
-            parse_json::<Vec<RawClusterConfig>>(&env::var("FLINK_UI_CLUSTERS_JSON").ok())?,
-        );
+        let configured_clusters = normalize_clusters(parse_json::<Vec<RawClusterConfig>>(
+            &env::var("FLINK_UI_CLUSTERS_JSON").ok(),
+        )?);
         let clusters = if configured_clusters.is_empty() {
             default_cluster_from_env()?
         } else {
             configured_clusters
         };
-        let fixture_mode =
-            parse_bool(env::var("FIXTURE_MODE").ok().as_deref(), clusters.is_empty()) || clusters.is_empty();
-        let fixture_file = root_dir.join(
-            env::var("FIXTURE_FILE").unwrap_or_else(|_| "apps/api/src/fixtures/jobs.json".to_owned()),
-        );
+        let fixture_mode = parse_bool(
+            env::var("FIXTURE_MODE").ok().as_deref(),
+            clusters.is_empty(),
+        ) || clusters.is_empty();
+        let fixture_file = root_dir
+            .join(env::var("FIXTURE_FILE").unwrap_or_else(|_| "fixtures/jobs.json".to_owned()));
 
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
@@ -122,9 +123,11 @@ fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<Cluste
         .enumerate()
         .filter_map(|(index, cluster)| {
             let api_url = cluster.api_url.or(cluster.url)?;
-            let bearer_token = cluster
-                .bearer_token
-                .or_else(|| cluster.bearer_token_file.and_then(|path| read_if_exists(path)));
+            let bearer_token = cluster.bearer_token.or_else(|| {
+                cluster
+                    .bearer_token_file
+                    .and_then(|path| read_if_exists(path))
+            });
 
             bearer_token.map(|bearer_token| ClusterConfig {
                 name: cluster
@@ -185,7 +188,8 @@ fn default_cluster_from_env() -> Result<Vec<ClusterConfig>> {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        flink_api_version: env::var("FLINK_K8S_API_VERSION").unwrap_or_else(|_| "v1beta1".to_owned()),
+        flink_api_version: env::var("FLINK_K8S_API_VERSION")
+            .unwrap_or_else(|_| "v1beta1".to_owned()),
         flink_rest_base_url: env::var("FLINK_REST_BASE_URL").ok(),
     }])
 }
@@ -194,7 +198,9 @@ fn read_if_exists<P>(path: P) -> Option<String>
 where
     P: AsRef<Path>,
 {
-    fs::read_to_string(path).ok().map(|value| value.trim().to_owned())
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 fn detect_root_dir() -> Result<PathBuf> {

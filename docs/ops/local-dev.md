@@ -7,15 +7,14 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Run the legacy Node backend
-```bash
-npm run dev:node
-```
-
 ## Run tests
 ```bash
+cargo test --manifest-path apps/api-rs/Cargo.toml
 npm test
 ```
+
+- `cargo test --manifest-path apps/api-rs/Cargo.toml` runs backend tests.
+- `npm test` runs frontend render tests.
 
 ## Build
 ```bash
@@ -37,7 +36,6 @@ npm run ci:smoke
 This runs:
 - `cargo test`
 - `npm test`
-- `npm run test:parity`
 - Docker image build
 - a fixture-mode container smoke check
 
@@ -67,3 +65,4 @@ npm start
 - The default `npm start` / `npm run dev` path now runs the Rust backend in `apps/api-rs`.
 - `FlinkSessionJob` collection is best-effort; clusters without that CR kind still work.
 - Flink REST enrichment is optional and never blocks job listing.
+- There is no separate Node backend runtime path anymore.

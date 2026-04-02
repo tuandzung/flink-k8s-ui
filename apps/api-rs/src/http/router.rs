@@ -1,6 +1,6 @@
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
-use axum::middleware::{from_fn_with_state, Next};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -33,11 +33,7 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.metrics.snapshot().await)
 }
 
-async fn track_requests(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn track_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
     state.metrics.increment_requests().await;
     let route = route_label(
         request.method().as_str(),
@@ -48,10 +44,7 @@ async fn track_requests(
     );
     let response = next.run(request).await;
     let status = response.status();
-    state
-        .metrics
-        .record_response(&route, status.as_u16())
-        .await;
+    state.metrics.record_response(&route, status.as_u16()).await;
 
     if status == StatusCode::NOT_FOUND {
         return response;
@@ -64,9 +57,8 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
     match (method, matched_path) {
         ("GET", Some("/api/jobs")) => "listJobs",
         ("GET", Some("/api/clusters")) => "getClusters",
-        ("GET", Some("/api/jobs/{id}")) | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => {
-            "getJob"
-        }
+        ("GET", Some("/api/jobs/{id}"))
+        | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => "getJob",
         ("GET", Some("/healthz")) => "healthz",
         ("GET", Some("/readyz")) => "readyz",
         ("GET", Some("/metrics")) => "metrics",
@@ -78,6 +70,7 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -86,7 +79,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::{Json, Router};
     use reqwest::Client;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
@@ -150,7 +143,7 @@ mod tests {
             port: 0,
             root_dir: workspace_root(),
             fixture_mode: false,
-            fixture_file: workspace_root().join("apps/api/src/fixtures/jobs.json"),
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
             clusters: vec![ClusterConfig {
@@ -173,7 +166,10 @@ mod tests {
             .await
             .expect("jobs response should succeed");
         assert_eq!(jobs_response.status(), StatusCode::OK);
-        let jobs_payload: Value = jobs_response.json().await.expect("jobs payload should be JSON");
+        let jobs_payload: Value = jobs_response
+            .json()
+            .await
+            .expect("jobs payload should be JSON");
         assert_eq!(jobs_payload["meta"]["total"], 1);
         assert_eq!(jobs_payload["jobs"][0]["resourceName"], "orders-stream");
         assert_eq!(jobs_payload["jobs"][0]["flinkJobId"], "job-123");
@@ -258,7 +254,7 @@ mod tests {
             port: 0,
             root_dir: workspace_root(),
             fixture_mode: false,
-            fixture_file: workspace_root().join("apps/api/src/fixtures/jobs.json"),
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
             clusters: vec![ClusterConfig {
@@ -294,6 +290,188 @@ mod tests {
         kubernetes.shutdown();
     }
 
+    #[tokio::test]
+    async fn fixture_mode_preserves_http_contract() {
+        let fixture_jobs = load_fixture_jobs();
+        let app = start_app(fixture_config()).await;
+        let client = Client::new();
+
+        let jobs_response = client
+            .get(format!("{}/api/jobs", app.base_url))
+            .send()
+            .await
+            .expect("jobs response should succeed");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_payload: Value = jobs_response
+            .json()
+            .await
+            .expect("jobs payload should be JSON");
+        assert_eq!(
+            jobs_payload["jobs"],
+            Value::Array(sort_fixture_jobs(fixture_jobs.clone()))
+        );
+        assert_eq!(jobs_payload["meta"]["total"], fixture_jobs.len());
+        assert!(
+            jobs_payload["meta"]["generatedAt"]
+                .as_str()
+                .expect("generatedAt should be a string")
+                .starts_with("20")
+        );
+
+        let clusters_response = client
+            .get(format!("{}/api/clusters", app.base_url))
+            .send()
+            .await
+            .expect("clusters response should succeed");
+        assert_eq!(clusters_response.status(), StatusCode::OK);
+        let clusters_payload: Value = clusters_response
+            .json()
+            .await
+            .expect("clusters payload should be JSON");
+        assert_eq!(
+            clusters_payload,
+            json!({"clusters":[{"name":"demo"},{"name":"prod"}]})
+        );
+
+        let detail_response = client
+            .get(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("detail response should succeed");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_payload: Value = detail_response
+            .json()
+            .await
+            .expect("detail payload should be JSON");
+        assert_eq!(
+            detail_payload,
+            json!({
+                "job": sort_fixture_jobs(fixture_jobs)
+                    .into_iter()
+                    .find(|job| {
+                        job["cluster"] == "demo"
+                            && job["namespace"] == "analytics"
+                            && job["kind"] == "FlinkDeployment"
+                            && job["resourceName"] == "orders-stream"
+                    })
+                    .expect("fixture job should exist")
+            })
+        );
+
+        let healthz_response = client
+            .get(format!("{}/healthz", app.base_url))
+            .send()
+            .await
+            .expect("healthz response should succeed");
+        assert_eq!(healthz_response.status(), StatusCode::OK);
+        let healthz_payload: Value = healthz_response
+            .json()
+            .await
+            .expect("healthz payload should be JSON");
+        assert_eq!(healthz_payload["status"], "ok");
+
+        let readyz_response = client
+            .get(format!("{}/readyz", app.base_url))
+            .send()
+            .await
+            .expect("readyz response should succeed");
+        assert_eq!(readyz_response.status(), StatusCode::OK);
+        let readyz_payload: Value = readyz_response
+            .json()
+            .await
+            .expect("readyz payload should be JSON");
+        assert_eq!(readyz_payload["status"], "ready");
+
+        let metrics_response = client
+            .get(format!("{}/metrics", app.base_url))
+            .send()
+            .await
+            .expect("metrics response should succeed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_payload: Value = metrics_response
+            .json()
+            .await
+            .expect("metrics payload should be JSON");
+        assert_eq!(metrics_payload["requestsTotal"], 6);
+        assert_eq!(metrics_payload["errorsTotal"], 0);
+        assert_eq!(
+            metrics_payload["routes"],
+            json!({
+              "getClusters": 1,
+              "getJob": 1,
+              "healthz": 1,
+              "listJobs": 1,
+              "readyz": 1
+            })
+        );
+
+        app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn fixture_mode_serves_static_ui_and_metrics() {
+        let app = start_app(fixture_config()).await;
+        let client = Client::new();
+
+        let page_response = client
+            .get(format!("{}/", app.base_url))
+            .send()
+            .await
+            .expect("page response should succeed");
+        assert_eq!(page_response.status(), StatusCode::OK);
+        let page_html = page_response.text().await.expect("page HTML should load");
+        assert!(page_html.contains("Jobs + Status Dashboard"));
+
+        let jobs_response = client
+            .get(format!("{}/api/jobs", app.base_url))
+            .send()
+            .await
+            .expect("jobs response should succeed");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_payload: Value = jobs_response
+            .json()
+            .await
+            .expect("jobs payload should be JSON");
+        assert_eq!(jobs_payload["meta"]["total"], 4);
+
+        let detail_response = client
+            .get(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("detail response should succeed");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_payload: Value = detail_response
+            .json()
+            .await
+            .expect("detail payload should be JSON");
+        assert_eq!(detail_payload["job"]["resourceName"], "orders-stream");
+
+        let metrics_response = client
+            .get(format!("{}/metrics", app.base_url))
+            .send()
+            .await
+            .expect("metrics response should succeed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_payload: Value = metrics_response
+            .json()
+            .await
+            .expect("metrics payload should be JSON");
+        assert!(
+            metrics_payload["requestsTotal"]
+                .as_u64()
+                .expect("requestsTotal should be numeric")
+                >= 3
+        );
+
+        app.shutdown();
+    }
+
     struct RunningServer {
         base_url: String,
         task: JoinHandle<()>,
@@ -311,9 +489,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have local address");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("app server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("app server should run");
         });
 
         RunningServer {
@@ -345,7 +527,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have local address");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -356,6 +540,46 @@ mod tests {
             base_url: format!("http://{}", address),
             task,
         }
+    }
+
+    fn fixture_config() -> AppConfig {
+        AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            root_dir: workspace_root(),
+            fixture_mode: true,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            clusters: Vec::new(),
+        }
+    }
+
+    fn load_fixture_jobs() -> Vec<Value> {
+        let fixture_path = workspace_root().join("fixtures/jobs.json");
+        let payload: Value = serde_json::from_str(
+            &fs::read_to_string(fixture_path).expect("fixture file should be readable"),
+        )
+        .expect("fixture JSON should parse");
+        payload["jobs"]
+            .as_array()
+            .expect("fixture jobs should be an array")
+            .clone()
+    }
+
+    fn sort_fixture_jobs(mut jobs: Vec<Value>) -> Vec<Value> {
+        jobs.sort_by(|left, right| {
+            left["cluster"]
+                .as_str()
+                .cmp(&right["cluster"].as_str())
+                .then_with(|| left["namespace"].as_str().cmp(&right["namespace"].as_str()))
+                .then_with(|| {
+                    left["resourceName"]
+                        .as_str()
+                        .cmp(&right["resourceName"].as_str())
+                })
+        });
+        jobs
     }
 
     fn workspace_root() -> PathBuf {
