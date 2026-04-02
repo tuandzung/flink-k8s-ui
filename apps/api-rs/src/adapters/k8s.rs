@@ -7,13 +7,17 @@ use crate::domain::job::Job;
 use crate::domain::normalize::normalize_flink_resource;
 use crate::error::UpstreamHttpError;
 
-pub async fn list_cluster_jobs(cluster: &ClusterConfig, request_timeout_ms: u64) -> Result<Vec<Job>> {
+pub async fn list_cluster_jobs(
+    cluster: &ClusterConfig,
+    request_timeout_ms: u64,
+) -> Result<Vec<Job>> {
     let deployments =
         list_resources_for_plural(cluster, "flinkdeployments", request_timeout_ms).await?;
-    let session_jobs = match list_resources_for_plural(cluster, "flinksessionjobs", request_timeout_ms).await {
-        Ok(resources) => resources,
-        Err(_) => Vec::new(),
-    };
+    let session_jobs =
+        match list_resources_for_plural(cluster, "flinksessionjobs", request_timeout_ms).await {
+            Ok(resources) => resources,
+            Err(_) => Vec::new(),
+        };
 
     Ok(deployments
         .into_iter()
@@ -69,8 +73,8 @@ fn build_namespace_paths(cluster: &ClusterConfig, plural: &str) -> Vec<String> {
 }
 
 fn build_client(cluster: &ClusterConfig, request_timeout_ms: u64) -> Result<Client> {
-    let mut builder = Client::builder()
-        .timeout(std::time::Duration::from_millis(request_timeout_ms));
+    let mut builder =
+        Client::builder().timeout(std::time::Duration::from_millis(request_timeout_ms));
 
     if let Some(ca_cert) = &cluster.ca_cert {
         let certificate = reqwest::Certificate::from_pem(ca_cert.as_bytes())
@@ -169,7 +173,9 @@ mod tests {
             flink_rest_base_url: None,
         };
 
-        let jobs = list_cluster_jobs(&cluster, 1_000).await.expect("jobs should load");
+        let jobs = list_cluster_jobs(&cluster, 1_000)
+            .await
+            .expect("jobs should load");
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].status, "running");
@@ -214,7 +220,9 @@ mod tests {
             flink_rest_base_url: None,
         };
 
-        let jobs = list_cluster_jobs(&cluster, 1_000).await.expect("jobs should load");
+        let jobs = list_cluster_jobs(&cluster, 1_000)
+            .await
+            .expect("jobs should load");
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].kind, "FlinkDeployment");
@@ -243,8 +251,11 @@ mod tests {
                     let path = uri.path().to_owned();
                     let maybe = shared.iter().find(|(candidate, _, _)| candidate == &path);
                     match maybe {
-                        Some((_, status, payload)) => (*status, Json(payload.clone())).into_response(),
-                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response(),
+                        Some((_, status, payload)) => {
+                            (*status, Json(payload.clone())).into_response()
+                        }
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
                     }
                 }
             }
@@ -252,9 +263,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have local address");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("mock server should run");
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
         });
 
         MockServer {

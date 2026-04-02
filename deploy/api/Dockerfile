@@ -5,7 +5,7 @@ COPY package.json ./package.json
 COPY apps/api-rs/Cargo.toml ./apps/api-rs/Cargo.toml
 COPY apps/api-rs/src ./apps/api-rs/src
 COPY apps/web/public ./apps/web/public
-COPY apps/api/src/fixtures ./apps/api/src/fixtures
+COPY fixtures ./fixtures
 
 RUN cargo build --manifest-path apps/api-rs/Cargo.toml --release
 
@@ -18,7 +18,7 @@ RUN apt-get update \
 
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/web/public ./apps/web/public
-COPY --from=build /app/apps/api/src/fixtures ./apps/api/src/fixtures
+COPY --from=build /app/fixtures ./fixtures
 COPY --from=build /app/apps/api-rs/target/release/flink-job-ui-api ./apps/api-rs/flink-job-ui-api
 
 ENV HOST=0.0.0.0

@@ -1,6 +1,6 @@
-use serde_json::{json, Value};
-use time::format_description::well_known::Rfc3339;
+use serde_json::{Value, json};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::config::ClusterConfig;
 use crate::domain::job::Job;
@@ -39,7 +39,10 @@ pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> J
     );
     let native_ui_url = first_defined(
         &resource,
-        &[&["status", "jobManagerUrl"], &["status", "jobManagerInfo", "url"]],
+        &[
+            &["status", "jobManagerUrl"],
+            &["status", "jobManagerInfo", "url"],
+        ],
     );
 
     normalize_base(
@@ -55,7 +58,11 @@ pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> J
 pub fn normalize_flink_session_job(resource: Value, cluster: &ClusterConfig) -> Job {
     let job_name = first_defined(
         &resource,
-        &[&["spec", "job", "name"], &["spec", "job", "jarURI"], &["metadata", "name"]],
+        &[
+            &["spec", "job", "name"],
+            &["spec", "job", "jarURI"],
+            &["metadata", "name"],
+        ],
     )
     .unwrap_or_else(|| "unknown".to_owned());
     let raw_status_values = collect_defined_strings(
@@ -100,7 +107,8 @@ fn normalize_base(
         .cloned()
         .unwrap_or_else(|| Value::Object(Default::default()));
     let status_info = canonicalize_status(raw_status_values);
-    let namespace = value_to_string(metadata.pointer("/namespace")).unwrap_or_else(|| "default".to_owned());
+    let namespace =
+        value_to_string(metadata.pointer("/namespace")).unwrap_or_else(|| "default".to_owned());
     let resource_name =
         value_to_string(metadata.pointer("/name")).unwrap_or_else(|| job_name.clone());
 
@@ -236,7 +244,8 @@ fn unique(values: Vec<String>) -> Vec<String> {
 }
 
 fn collect_defined_strings(resource: &Value, paths: &[&[&str]]) -> Vec<String> {
-    paths.iter()
+    paths
+        .iter()
         .filter_map(|path| get_string(resource, path))
         .collect()
 }
@@ -251,7 +260,11 @@ fn get_string(resource: &Value, path: &[&str]) -> Option<String> {
 }
 
 fn first_defined_value<'a>(values: &[Option<&'a Value>]) -> Option<&'a Value> {
-    values.iter().copied().flatten().find(|value| !value.is_null())
+    values
+        .iter()
+        .copied()
+        .flatten()
+        .find(|value| !value.is_null())
 }
 
 fn to_pointer(path: &[&str]) -> String {
@@ -280,4 +293,93 @@ fn to_iso_or_null(value: &Value) -> Option<String> {
     OffsetDateTime::parse(text, &Rfc3339)
         .ok()
         .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_flink_deployment, normalize_flink_session_job};
+    use crate::config::ClusterConfig;
+    use serde_json::json;
+
+    fn cluster() -> ClusterConfig {
+        ClusterConfig {
+            name: "demo".to_owned(),
+            api_url: "https://kubernetes.default.svc".to_owned(),
+            bearer_token: "token".to_owned(),
+            ca_cert: None,
+            insecure_skip_tls_verify: false,
+            namespaces: vec!["analytics".to_owned()],
+            flink_api_version: "v1beta1".to_owned(),
+            flink_rest_base_url: None,
+        }
+    }
+
+    #[test]
+    fn normalize_flink_deployment_maps_running_state_to_healthy_status() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "orders",
+                "namespace": "analytics",
+                "creationTimestamp": "2026-04-01T00:00:00Z",
+                "labels": {
+                    "app.kubernetes.io/name": "orders-stream"
+                }
+            },
+            "spec": {
+                "flinkVersion": "1.19",
+                "mode": "native",
+                "job": {
+                    "name": "orders-job"
+                }
+            },
+            "status": {
+                "jobStatus": { "state": "RUNNING" },
+                "reconciliationStatus": {
+                    "state": "READY",
+                    "lastReconciledAt": "2026-04-02T00:00:00Z"
+                },
+                "jobManagerUrl": "https://example/jobs/orders"
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &cluster());
+
+        assert_eq!(normalized.status, "running");
+        assert_eq!(normalized.health, "healthy");
+        assert_eq!(normalized.cluster, "demo");
+        assert_eq!(normalized.namespace, "analytics");
+        assert_eq!(normalized.job_name, "orders-job");
+        assert_eq!(
+            normalized.last_updated_at.as_deref(),
+            Some("2026-04-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn normalize_flink_session_job_maps_suspended_state_to_warning_health() {
+        let resource = json!({
+            "kind": "FlinkSessionJob",
+            "metadata": {
+                "name": "settlement",
+                "namespace": "payments",
+                "creationTimestamp": "2026-04-01T00:00:00Z"
+            },
+            "spec": {
+                "job": {
+                    "name": "settlement-job",
+                    "state": "SUSPENDED"
+                }
+            },
+            "status": {
+                "jobStatus": { "state": "SUSPENDED" }
+            }
+        });
+
+        let normalized = normalize_flink_session_job(resource, &cluster());
+
+        assert_eq!(normalized.status, "suspended");
+        assert_eq!(normalized.health, "warning");
+        assert_eq!(normalized.job_name, "settlement-job");
+    }
 }

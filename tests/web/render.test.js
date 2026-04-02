@@ -7,7 +7,7 @@ import {
   renderTable,
   renderWarnings
 } from '../../apps/web/public/render.js';
-import fixture from '../../apps/api/src/fixtures/jobs.json' with { type: 'json' };
+import fixture from '../../fixtures/jobs.json' with { type: 'json' };
 
 test('filterJobs applies status and search filters together', () => {
   const filtered = filterJobs(fixture.jobs, {
