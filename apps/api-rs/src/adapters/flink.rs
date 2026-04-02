@@ -5,7 +5,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::domain::job::Job;
+use crate::domain::job::{FlinkRestOverview, Job};
 
 pub async fn enrich_jobs(jobs: Vec<Job>, request_timeout_ms: u64) -> Vec<Job> {
     let client = Client::builder()
@@ -106,9 +106,27 @@ fn merge_overview(mut job: Job, payload: Value) -> Job {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or(job.raw_status);
-    if let Some(details) = job.details.as_object_mut() {
-        details.insert("flinkRestOverview".to_owned(), candidate);
-    }
+    job.details.flink_rest_overview = Some(FlinkRestOverview {
+        job_id: candidate
+            .get("jid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        job_name: candidate
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(job.job_name.as_str())
+            .to_owned(),
+        state: candidate
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or(job.raw_status.as_str())
+            .to_owned(),
+        started_at: candidate
+            .get("start-time")
+            .and_then(Value::as_i64)
+            .and_then(timestamp_millis_to_rfc3339),
+    });
     job
 }
 
@@ -137,6 +155,8 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
+    use crate::domain::job::JobDetails;
+
     #[tokio::test]
     async fn enrich_jobs_warns_when_no_jobmanager_url_exists() {
         let jobs = enrich_jobs(
@@ -157,7 +177,7 @@ mod tests {
                 flink_job_id: None,
                 native_ui_url: None,
                 warnings: Vec::new(),
-                details: json!({}),
+                details: JobDetails::default(),
             }],
             500,
         )
@@ -203,7 +223,7 @@ mod tests {
                 flink_job_id: None,
                 native_ui_url: Some(format!("{}/orders-stream/", mock.base_url)),
                 warnings: Vec::new(),
-                details: json!({}),
+                details: JobDetails::default(),
             }],
             500,
         )
@@ -214,10 +234,16 @@ mod tests {
         assert!(
             jobs[0]
                 .details
-                .get("flinkRestOverview")
-                .and_then(|overview| overview.get("jid"))
-                .and_then(Value::as_str)
-                == Some("job-123")
+                .flink_rest_overview
+                .as_ref()
+                .map(|overview| {
+                    (
+                        overview.job_id.as_str(),
+                        overview.job_name.as_str(),
+                        overview.state.as_str(),
+                    )
+                })
+                == Some(("job-123", "orders-stream", "RUNNING"))
         );
 
         mock.shutdown();
@@ -256,7 +282,7 @@ mod tests {
                 flink_job_id: None,
                 native_ui_url: Some(format!("{}/orders-stream/", mock.base_url)),
                 warnings: Vec::new(),
-                details: json!({}),
+                details: JobDetails::default(),
             }],
             500,
         )
@@ -299,7 +325,7 @@ mod tests {
                 flink_job_id: None,
                 native_ui_url: Some(format!("{}/orders-stream/", mock.base_url)),
                 warnings: Vec::new(),
-                details: json!({}),
+                details: JobDetails::default(),
             }],
             500,
         )

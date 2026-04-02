@@ -33,10 +33,12 @@ test('renderTable shows empty state when there are no jobs', () => {
   assert.match(html, /No jobs match the current filters/);
 });
 
-test('renderDrawer includes warnings and raw payload', () => {
+test('renderDrawer includes warnings and sanitized status details', () => {
   const html = renderDrawer(fixture.jobs[3]);
   assert.match(html, /Restart backoff exceeded on JobManager/);
-  assert.match(html, /Raw status/);
+  assert.match(html, /Status details/);
+  assert.doesNotMatch(html, /"metadata"/);
+  assert.doesNotMatch(html, /"spec"/);
 });
 
 test('renderWarnings highlights partial enrichment state', () => {
