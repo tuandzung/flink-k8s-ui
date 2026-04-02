@@ -1,9 +1,9 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::config::ClusterConfig;
-use crate::domain::job::Job;
+use crate::domain::job::{Job, JobDetails, JobStatusSummary};
 
 pub fn normalize_flink_resource(resource: Value, cluster: &ClusterConfig) -> Job {
     let kind = get_string(&resource, &["kind"]).unwrap_or_else(|| "FlinkDeployment".to_owned());
@@ -112,6 +112,22 @@ fn normalize_base(
     let resource_name =
         value_to_string(metadata.pointer("/name")).unwrap_or_else(|| job_name.clone());
 
+    let status_summary = JobStatusSummary {
+        job_state: value_to_string(status.pointer("/jobStatus/state")),
+        lifecycle_state: value_to_string(status.pointer("/lifecycleState")),
+        reconciliation_state: value_to_string(status.pointer("/reconciliationStatus/state")),
+        last_reconciled_at: status
+            .pointer("/reconciliationStatus/lastReconciledAt")
+            .and_then(to_iso_or_null),
+        error: first_defined_value(&[
+            status.pointer("/error"),
+            status.pointer("/jobStatus/error"),
+            status.pointer("/errorMessage"),
+            status.pointer("/reconciliationStatus/error"),
+        ])
+        .and_then(|value| value_to_string(Some(value))),
+    };
+
     Job {
         id: format!("{}:{}:{}:{}", cluster.name, namespace, kind, resource_name),
         cluster: cluster.name.clone(),
@@ -145,11 +161,10 @@ fn normalize_base(
         flink_job_id: None,
         native_ui_url,
         warnings: build_warnings(&status),
-        details: json!({
-            "metadata": metadata,
-            "spec": spec,
-            "status": status
-        }),
+        details: JobDetails {
+            status_summary: (!status_summary.is_empty()).then_some(status_summary),
+            flink_rest_overview: None,
+        },
     }
 }
 
@@ -351,6 +366,15 @@ mod tests {
         assert_eq!(normalized.namespace, "analytics");
         assert_eq!(normalized.job_name, "orders-job");
         assert_eq!(
+            normalized
+                .details
+                .status_summary
+                .as_ref()
+                .and_then(|summary| summary.job_state.as_deref()),
+            Some("RUNNING")
+        );
+        assert!(normalized.details.flink_rest_overview.is_none());
+        assert_eq!(
             normalized.last_updated_at.as_deref(),
             Some("2026-04-02T00:00:00Z")
         );
@@ -381,5 +405,13 @@ mod tests {
         assert_eq!(normalized.status, "suspended");
         assert_eq!(normalized.health, "warning");
         assert_eq!(normalized.job_name, "settlement-job");
+        assert_eq!(
+            normalized
+                .details
+                .status_summary
+                .as_ref()
+                .and_then(|summary| summary.job_state.as_deref()),
+            Some("SUSPENDED")
+        );
     }
 }

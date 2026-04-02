@@ -17,18 +17,16 @@
       "nativeUiUrl": "https://flink.example.com/orders-stream/",
       "warnings": [],
       "details": {
-        "metadata": {
-          "labels": {
-            "team": "streaming"
-          }
+        "statusSummary": {
+          "jobState": "RUNNING",
+          "reconciliationState": "READY",
+          "lastReconciledAt": "2026-04-02T03:50:00.000Z"
         },
-        "spec": {
-          "parallelism": 4
-        },
-        "status": {
-          "jobStatus": {
-            "state": "RUNNING"
-          }
+        "flinkRestOverview": {
+          "jobId": "job-123",
+          "jobName": "orders-stream",
+          "state": "RUNNING",
+          "startedAt": "2026-04-01T22:00:00.000Z"
         }
       }
     },
@@ -51,10 +49,8 @@
         "Flink REST enrichment unavailable: no JobManager URL"
       ],
       "details": {
-        "status": {
-          "reconciliationStatus": {
-            "state": "UPGRADING"
-          }
+        "statusSummary": {
+          "reconciliationState": "UPGRADING"
         }
       }
     },
@@ -75,10 +71,8 @@
       "nativeUiUrl": null,
       "warnings": [],
       "details": {
-        "status": {
-          "jobStatus": {
-            "state": "SUSPENDED"
-          }
+        "statusSummary": {
+          "jobState": "SUSPENDED"
         }
       }
     },
@@ -101,7 +95,7 @@
         "Restart backoff exceeded on JobManager"
       ],
       "details": {
-        "status": {
+        "statusSummary": {
           "error": "Restart backoff exceeded on JobManager"
         }
       }

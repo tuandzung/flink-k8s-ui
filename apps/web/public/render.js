@@ -173,7 +173,7 @@ export function renderDrawer(job) {
               .join('')}</ul>`
           : '<p class="muted">No warnings reported.</p>'
       }
-      <h3>Raw status</h3>
+      <h3>Status details</h3>
       <pre>${escapeHtml(JSON.stringify(job.details, null, 2))}</pre>
     </div>
   `;

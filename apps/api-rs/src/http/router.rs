@@ -193,7 +193,21 @@ mod tests {
         assert_eq!(jobs_payload["jobs"][0]["flinkJobId"], "job-123");
         assert_eq!(jobs_payload["jobs"][0]["rawStatus"], "RUNNING");
         assert_eq!(jobs_payload["jobs"][0]["warnings"], json!([]));
-        assert!(jobs_payload["jobs"][0]["details"]["flinkRestOverview"].is_object());
+        assert_eq!(
+            jobs_payload["jobs"][0]["details"]["statusSummary"]["jobState"],
+            "READY"
+        );
+        assert_eq!(
+            jobs_payload["jobs"][0]["details"]["statusSummary"]["reconciliationState"],
+            "READY"
+        );
+        assert_eq!(
+            jobs_payload["jobs"][0]["details"]["flinkRestOverview"]["jobId"],
+            "job-123"
+        );
+        assert!(jobs_payload["jobs"][0]["details"].get("metadata").is_none());
+        assert!(jobs_payload["jobs"][0]["details"].get("spec").is_none());
+        assert!(jobs_payload["jobs"][0]["details"].get("status").is_none());
 
         let clusters_response = authorized(client.get(format!("{}/api/clusters", app.base_url)))
             .send()
@@ -355,6 +369,9 @@ mod tests {
                     .expect("fixture job should exist")
             })
         );
+        assert!(detail_payload["job"]["details"].get("metadata").is_none());
+        assert!(detail_payload["job"]["details"].get("spec").is_none());
+        assert!(detail_payload["job"]["details"].get("status").is_none());
 
         let healthz_response = client
             .get(format!("{}/healthz", app.base_url))
