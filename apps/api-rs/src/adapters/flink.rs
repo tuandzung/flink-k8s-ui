@@ -92,40 +92,33 @@ fn merge_overview(mut job: Job, payload: Value) -> Job {
         );
     };
 
-    job.flink_job_id = candidate
+    let overview_job_id = candidate
         .get("jid")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    job.started_at = candidate
-        .get("start-time")
-        .and_then(Value::as_i64)
-        .and_then(timestamp_millis_to_rfc3339)
-        .or(job.started_at);
-    job.raw_status = candidate
+    let overview_job_name = candidate
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let overview_state = candidate
         .get("state")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or(job.raw_status);
+        .map(ToOwned::to_owned);
+    let overview_started_at = candidate
+        .get("start-time")
+        .and_then(Value::as_i64)
+        .and_then(timestamp_millis_to_rfc3339);
+
+    job.flink_job_id = overview_job_id.clone();
+    job.started_at = overview_started_at.clone().or(job.started_at);
+    if let Some(state) = overview_state.clone() {
+        job.raw_status = state;
+    }
     job.details.flink_rest_overview = Some(FlinkRestOverview {
-        job_id: candidate
-            .get("jid")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        job_name: candidate
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(job.job_name.as_str())
-            .to_owned(),
-        state: candidate
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or(job.raw_status.as_str())
-            .to_owned(),
-        started_at: candidate
-            .get("start-time")
-            .and_then(Value::as_i64)
-            .and_then(timestamp_millis_to_rfc3339),
+        job_id: overview_job_id.unwrap_or_default(),
+        job_name: overview_job_name.unwrap_or_else(|| job.job_name.clone()),
+        state: overview_state.unwrap_or_else(|| job.raw_status.clone()),
+        started_at: overview_started_at,
     });
     job
 }

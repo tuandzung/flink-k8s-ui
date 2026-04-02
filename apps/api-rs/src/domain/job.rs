@@ -49,11 +49,7 @@ pub struct JobStatusSummary {
 
 impl JobStatusSummary {
     pub fn is_empty(&self) -> bool {
-        self.job_state.is_none()
-            && self.lifecycle_state.is_none()
-            && self.reconciliation_state.is_none()
-            && self.last_reconciled_at.is_none()
-            && self.error.is_none()
+        self == &Self::default()
     }
 }
 

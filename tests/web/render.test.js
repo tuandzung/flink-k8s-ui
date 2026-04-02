@@ -37,6 +37,7 @@ test('renderDrawer includes warnings and sanitized status details', () => {
   const html = renderDrawer(fixture.jobs[3]);
   assert.match(html, /Restart backoff exceeded on JobManager/);
   assert.match(html, /Status details/);
+  assert.match(html, /"statusSummary"/);
   assert.doesNotMatch(html, /"metadata"/);
   assert.doesNotMatch(html, /"spec"/);
 });
