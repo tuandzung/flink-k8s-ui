@@ -2,6 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: flink-job-ui
+  annotations:
+    flink-job-ui.io/runtime: rust
+    flink-job-ui.io/auth-owner: upstream-ingress
+    flink-job-ui.io/metrics-policy: protected-or-internal-only
 spec:
   replicas: 1
   selector:
@@ -11,6 +15,9 @@ spec:
     metadata:
       labels:
         app: flink-job-ui
+        app.kubernetes.io/runtime: rust
+      annotations:
+        flink-job-ui.io/auth-owner: upstream-ingress
     spec:
       serviceAccountName: flink-job-ui
       containers:

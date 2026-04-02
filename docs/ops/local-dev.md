@@ -7,6 +7,12 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Runtime and auth model
+- `npm start` delegates to `npm run start:rust`, which runs the supported Rust backend in `apps/api-rs`.
+- `npm run dev` keeps fixture-mode local development intentionally unauthenticated.
+- Production traffic for `/` and `/api/*` is expected to be authenticated by an upstream ingress or reverse proxy before requests reach the app.
+- `/metrics` is an operations endpoint and should stay behind the same trusted auth boundary or a separate internal-only scrape path.
+
 ## Run tests
 ```bash
 cargo test --manifest-path apps/api-rs/Cargo.toml
@@ -40,6 +46,8 @@ This runs:
 - a fixture-mode container smoke check
 
 ## Run against Kubernetes
+The example deployment assumes the Rust backend is the only supported production runtime and that ingress/reverse-proxy auth is configured in front of the app.
+
 Provide either:
 
 1. `FLINK_UI_CLUSTERS_JSON` with one or more cluster objects, or
@@ -66,3 +74,4 @@ npm start
 - `FlinkSessionJob` collection is best-effort; clusters without that CR kind still work.
 - Flink REST enrichment is optional and never blocks job listing.
 - There is no separate Node backend runtime path anymore.
+- Do not expose `/metrics` anonymously; keep it behind upstream auth or an internal-only operations path.
