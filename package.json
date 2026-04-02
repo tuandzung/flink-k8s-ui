@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "cargo run --manifest-path apps/api-rs/Cargo.toml",
-    "dev": "FIXTURE_MODE=true cargo run --manifest-path apps/api-rs/Cargo.toml",
+    "start": "npm run start:rust",
+    "start:rust": "cargo run --manifest-path apps/api-rs/Cargo.toml",
+    "dev": "FIXTURE_MODE=true npm run start:rust",
     "build": "node scripts/build.mjs",
     "ci:smoke": "node scripts/ci-smoke.mjs",
     "test": "node --test tests/web/*.test.js"

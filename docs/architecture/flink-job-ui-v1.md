@@ -45,7 +45,14 @@ Raw status is still preserved in the details view for troubleshooting.
 - `FLINK_UI_CLUSTERS_JSON` supports explicit cluster config
 - `K8S_*` env vars support a single-cluster deployment
 
+## Protection model
+- The supported production runtime is the Rust service in `apps/api-rs`; both `npm start` and the example Kubernetes deployment execute that binary.
+- End-user authentication is currently owned by the upstream ingress or reverse proxy, not by the application process itself.
+- The same upstream auth boundary is expected to cover both the static UI (`/`) and the read-only API (`/api/*`).
+- `/metrics` is an operational endpoint. Keep it behind the same trusted ingress auth layer or expose it only on an internal-only scrape path.
+- Local fixture-mode development is intentionally ungated so a single developer can run the UI without provisioning SSO.
+
 ## Next extension points
 - namespace or cluster-level watches instead of polling
-- auth/SSO in front of the UI
+- app-level auth if the ingress-owned model no longer fits the deployment environment
 - control actions like suspend/cancel after read-only v1 is accepted

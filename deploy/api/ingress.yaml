@@ -2,11 +2,19 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: flink-job-ui
+  annotations:
+    flink-job-ui.io/auth-owner: upstream-ingress
+    flink-job-ui.io/public-surface: ui-and-readonly-api
+    flink-job-ui.io/metrics-policy: do-not-expose-anonymously
+    # Configure your ingress-controller-specific auth integration here
+    # (for example OAuth2 proxy, SSO, or mTLS) before exposing this host.
 spec:
   rules:
     - host: flink-jobs.example.com
       http:
         paths:
+          # This public ingress fronts the UI and readonly API.
+          # Keep /metrics behind the same auth boundary or on a separate internal ingress.
           - path: /
             pathType: Prefix
             backend:
