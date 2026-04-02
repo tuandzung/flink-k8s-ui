@@ -1,0 +1,283 @@
+use serde_json::{json, Value};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+
+use crate::config::ClusterConfig;
+use crate::domain::job::Job;
+
+pub fn normalize_flink_resource(resource: Value, cluster: &ClusterConfig) -> Job {
+    let kind = get_string(&resource, &["kind"]).unwrap_or_else(|| "FlinkDeployment".to_owned());
+
+    if kind == "FlinkSessionJob" {
+        normalize_flink_session_job(resource, cluster)
+    } else {
+        normalize_flink_deployment(resource, cluster)
+    }
+}
+
+pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> Job {
+    let job_name = first_defined(
+        &resource,
+        &[
+            &["spec", "job", "name"],
+            &["spec", "job", "entryClass"],
+            &["metadata", "labels", "app.kubernetes.io/name"],
+            &["metadata", "name"],
+        ],
+    )
+    .unwrap_or_else(|| "unknown".to_owned());
+
+    let raw_status_values = collect_defined_strings(
+        &resource,
+        &[
+            &["status", "jobStatus", "state"],
+            &["status", "lifecycleState"],
+            &["status", "jobManagerDeploymentStatus"],
+            &["status", "reconciliationStatus", "state"],
+            &["spec", "job", "state"],
+        ],
+    );
+    let native_ui_url = first_defined(
+        &resource,
+        &[&["status", "jobManagerUrl"], &["status", "jobManagerInfo", "url"]],
+    );
+
+    normalize_base(
+        resource,
+        cluster,
+        "FlinkDeployment",
+        job_name,
+        raw_status_values,
+        native_ui_url,
+    )
+}
+
+pub fn normalize_flink_session_job(resource: Value, cluster: &ClusterConfig) -> Job {
+    let job_name = first_defined(
+        &resource,
+        &[&["spec", "job", "name"], &["spec", "job", "jarURI"], &["metadata", "name"]],
+    )
+    .unwrap_or_else(|| "unknown".to_owned());
+    let raw_status_values = collect_defined_strings(
+        &resource,
+        &[
+            &["status", "jobStatus", "state"],
+            &["status", "lifecycleState"],
+            &["status", "reconciliationStatus", "state"],
+            &["spec", "job", "state"],
+        ],
+    );
+    let native_ui_url = first_defined(&resource, &[&["status", "jobManagerUrl"]]);
+
+    normalize_base(
+        resource,
+        cluster,
+        "FlinkSessionJob",
+        job_name,
+        raw_status_values,
+        native_ui_url,
+    )
+}
+
+fn normalize_base(
+    resource: Value,
+    cluster: &ClusterConfig,
+    kind: &str,
+    job_name: String,
+    raw_status_values: Vec<String>,
+    native_ui_url: Option<String>,
+) -> Job {
+    let metadata = resource
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let spec = resource
+        .get("spec")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let status = resource
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let status_info = canonicalize_status(raw_status_values);
+    let namespace = value_to_string(metadata.pointer("/namespace")).unwrap_or_else(|| "default".to_owned());
+    let resource_name =
+        value_to_string(metadata.pointer("/name")).unwrap_or_else(|| job_name.clone());
+
+    Job {
+        id: format!("{}:{}:{}:{}", cluster.name, namespace, kind, resource_name),
+        cluster: cluster.name.clone(),
+        namespace,
+        kind: kind.to_owned(),
+        resource_name: resource_name.clone(),
+        job_name,
+        status: status_info.status,
+        health: status_info.health,
+        raw_status: status_info.raw_status,
+        flink_version: first_defined_value(&[spec.pointer("/flinkVersion")])
+            .and_then(|value| value_to_string(Some(value))),
+        deployment_mode: first_defined_value(&[
+            spec.pointer("/mode"),
+            spec.pointer("/deploymentMode"),
+            spec.pointer("/job/upgradeMode"),
+        ])
+        .and_then(|value| value_to_string(Some(value))),
+        last_updated_at: first_defined_value(&[
+            status.pointer("/reconciliationStatus/lastReconciledAt"),
+            status.pointer("/jobStatus/updateTime"),
+            metadata.pointer("/creationTimestamp"),
+        ])
+        .and_then(to_iso_or_null),
+        started_at: first_defined_value(&[
+            status.pointer("/jobStatus/startTime"),
+            status.pointer("/jobManagerDeploymentStatus/startTime"),
+            metadata.pointer("/creationTimestamp"),
+        ])
+        .and_then(to_iso_or_null),
+        flink_job_id: None,
+        native_ui_url,
+        warnings: build_warnings(&status),
+        details: json!({
+            "metadata": metadata,
+            "spec": spec,
+            "status": status
+        }),
+    }
+}
+
+struct StatusInfo {
+    status: String,
+    health: String,
+    raw_status: String,
+}
+
+fn canonicalize_status(raw_values: Vec<String>) -> StatusInfo {
+    let raw = raw_values.join(" / ");
+    let normalized = raw.to_ascii_lowercase();
+
+    if normalized.is_empty() {
+        return StatusInfo {
+            status: "unknown".to_owned(),
+            health: "unknown".to_owned(),
+            raw_status: "Unknown".to_owned(),
+        };
+    }
+
+    if ["error", "fail", "missing"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return StatusInfo {
+            status: "failed".to_owned(),
+            health: "error".to_owned(),
+            raw_status: raw,
+        };
+    }
+
+    if normalized.contains("suspend") {
+        return StatusInfo {
+            status: "suspended".to_owned(),
+            health: "warning".to_owned(),
+            raw_status: raw,
+        };
+    }
+
+    if ["reconcil", "deploy", "progress", "upgrad"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return StatusInfo {
+            status: "reconciling".to_owned(),
+            health: "warning".to_owned(),
+            raw_status: raw,
+        };
+    }
+
+    if ["run", "ready", "stable"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return StatusInfo {
+            status: "running".to_owned(),
+            health: "healthy".to_owned(),
+            raw_status: raw,
+        };
+    }
+
+    StatusInfo {
+        status: "unknown".to_owned(),
+        health: "unknown".to_owned(),
+        raw_status: raw,
+    }
+}
+
+fn build_warnings(status: &Value) -> Vec<String> {
+    unique(
+        [
+            status.pointer("/error"),
+            status.pointer("/jobStatus/error"),
+            status.pointer("/errorMessage"),
+            status.pointer("/reconciliationStatus/error"),
+        ]
+        .into_iter()
+        .filter_map(value_to_string)
+        .collect(),
+    )
+}
+
+fn unique(values: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for value in values {
+        if !deduped.contains(&value) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
+
+fn collect_defined_strings(resource: &Value, paths: &[&[&str]]) -> Vec<String> {
+    paths.iter()
+        .filter_map(|path| get_string(resource, path))
+        .collect()
+}
+
+fn first_defined(resource: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| get_string(resource, path))
+}
+
+fn get_string(resource: &Value, path: &[&str]) -> Option<String> {
+    let pointer = to_pointer(path);
+    value_to_string(resource.pointer(&pointer))
+}
+
+fn first_defined_value<'a>(values: &[Option<&'a Value>]) -> Option<&'a Value> {
+    values.iter().copied().flatten().find(|value| !value.is_null())
+}
+
+fn to_pointer(path: &[&str]) -> String {
+    let mut pointer = String::new();
+    for segment in path {
+        pointer.push('/');
+        pointer.push_str(segment);
+    }
+    pointer
+}
+
+fn value_to_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn to_iso_or_null(value: &Value) -> Option<String> {
+    let Value::String(text) = value else {
+        return None;
+    };
+    OffsetDateTime::parse(text, &Rfc3339)
+        .ok()
+        .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+}

@@ -1,0 +1,37 @@
+name: CI Smoke
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+          cargo --version
+          rustc --version
+          docker --version
+
+      - name: Run CI smoke workflow
+        run: npm run ci:smoke

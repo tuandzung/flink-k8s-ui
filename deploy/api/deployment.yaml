@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-job-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink-job-ui
+  template:
+    metadata:
+      labels:
+        app: flink-job-ui
+    spec:
+      serviceAccountName: flink-job-ui
+      containers:
+        - name: api
+          image: flink-job-ui:latest
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: ["./apps/api-rs/flink-job-ui-api"]
+          env:
+            - name: PORT
+              value: "3000"
+            - name: FIXTURE_MODE
+              value: "false"
+            - name: WATCH_NAMESPACES
+              value: "analytics,payments"
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000

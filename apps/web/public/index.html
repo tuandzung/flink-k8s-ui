@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flink Jobs UI</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Flink on Kubernetes</p>
+        <h1>Jobs + Status Dashboard</h1>
+        <p class="subtitle">
+          Read-only v1 for viewing FlinkDeployment and FlinkSessionJob status across
+          watched namespaces.
+        </p>
+      </div>
+      <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="filters" id="filters"></div>
+        <div id="summary" class="summary"></div>
+        <div id="content" class="table-wrap"></div>
+      </section>
+      <aside class="drawer" id="drawer">
+        <div id="drawer-content"></div>
+      </aside>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,110 @@
+{
+  "jobs": [
+    {
+      "id": "demo:analytics:FlinkDeployment:orders-stream",
+      "cluster": "demo",
+      "namespace": "analytics",
+      "kind": "FlinkDeployment",
+      "resourceName": "orders-stream",
+      "jobName": "orders-stream",
+      "status": "running",
+      "health": "healthy",
+      "rawStatus": "RUNNING / READY",
+      "flinkVersion": "1.19",
+      "deploymentMode": "native",
+      "lastUpdatedAt": "2026-04-02T03:50:00.000Z",
+      "startedAt": "2026-04-01T22:00:00.000Z",
+      "nativeUiUrl": "https://flink.example.com/orders-stream/",
+      "warnings": [],
+      "details": {
+        "metadata": {
+          "labels": {
+            "team": "streaming"
+          }
+        },
+        "spec": {
+          "parallelism": 4
+        },
+        "status": {
+          "jobStatus": {
+            "state": "RUNNING"
+          }
+        }
+      }
+    },
+    {
+      "id": "demo:analytics:FlinkDeployment:billing-stream",
+      "cluster": "demo",
+      "namespace": "analytics",
+      "kind": "FlinkDeployment",
+      "resourceName": "billing-stream",
+      "jobName": "billing-stream",
+      "status": "reconciling",
+      "health": "warning",
+      "rawStatus": "RECONCILING / UPGRADING",
+      "flinkVersion": "1.19",
+      "deploymentMode": "native",
+      "lastUpdatedAt": "2026-04-02T03:45:00.000Z",
+      "startedAt": "2026-04-01T18:00:00.000Z",
+      "nativeUiUrl": null,
+      "warnings": [
+        "Flink REST enrichment unavailable: no JobManager URL"
+      ],
+      "details": {
+        "status": {
+          "reconciliationStatus": {
+            "state": "UPGRADING"
+          }
+        }
+      }
+    },
+    {
+      "id": "demo:payments:FlinkSessionJob:settlement-job",
+      "cluster": "demo",
+      "namespace": "payments",
+      "kind": "FlinkSessionJob",
+      "resourceName": "settlement-job",
+      "jobName": "settlement-job",
+      "status": "suspended",
+      "health": "warning",
+      "rawStatus": "SUSPENDED",
+      "flinkVersion": "1.18",
+      "deploymentMode": "savepoint",
+      "lastUpdatedAt": "2026-04-02T01:20:00.000Z",
+      "startedAt": "2026-03-29T09:00:00.000Z",
+      "nativeUiUrl": null,
+      "warnings": [],
+      "details": {
+        "status": {
+          "jobStatus": {
+            "state": "SUSPENDED"
+          }
+        }
+      }
+    },
+    {
+      "id": "prod:risk:FlinkDeployment:risk-detector",
+      "cluster": "prod",
+      "namespace": "risk",
+      "kind": "FlinkDeployment",
+      "resourceName": "risk-detector",
+      "jobName": "risk-detector",
+      "status": "failed",
+      "health": "error",
+      "rawStatus": "FAILED / ERROR",
+      "flinkVersion": "1.19",
+      "deploymentMode": "native",
+      "lastUpdatedAt": "2026-04-02T03:15:00.000Z",
+      "startedAt": "2026-04-01T03:00:00.000Z",
+      "nativeUiUrl": "https://flink.example.com/risk-detector/",
+      "warnings": [
+        "Restart backoff exceeded on JobManager"
+      ],
+      "details": {
+        "status": {
+          "error": "Restart backoff exceeded on JobManager"
+        }
+      }
+    }
+  ]
+}

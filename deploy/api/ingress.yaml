@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flink-job-ui
+spec:
+  rules:
+    - host: flink-jobs.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: flink-job-ui
+                port:
+                  number: 80
