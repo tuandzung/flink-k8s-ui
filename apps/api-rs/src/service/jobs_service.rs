@@ -124,6 +124,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            trusted_auth_headers: vec!["x-auth-request-user".to_owned()],
             clusters: Vec::new(),
         }
     }

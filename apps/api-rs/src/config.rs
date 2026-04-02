@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 const SERVICE_ACCOUNT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+const DEFAULT_TRUSTED_AUTH_HEADERS: [&str; 2] = ["x-auth-request-user", "x-forwarded-user"];
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -17,6 +18,7 @@ pub struct AppConfig {
     pub fixture_file: PathBuf,
     pub cache_ttl_ms: u64,
     pub request_timeout_ms: u64,
+    pub trusted_auth_headers: Vec<String>,
     pub clusters: Vec<ClusterConfig>,
 }
 
@@ -50,6 +52,8 @@ impl AppConfig {
         ) || clusters.is_empty();
         let fixture_file = root_dir
             .join(env::var("FIXTURE_FILE").unwrap_or_else(|_| "fixtures/jobs.json".to_owned()));
+        let trusted_auth_headers =
+            parse_trusted_auth_headers(env::var("AUTH_TRUSTED_HEADERS").ok());
 
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
@@ -68,6 +72,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4_000),
+            trusted_auth_headers,
             clusters,
         })
     }
@@ -113,6 +118,26 @@ where
             Ok(Some(parsed))
         }
         _ => Ok(None),
+    }
+}
+
+fn parse_trusted_auth_headers(value: Option<String>) -> Vec<String> {
+    let headers = value
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .map(|header| header.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if headers.is_empty() {
+        DEFAULT_TRUSTED_AUTH_HEADERS
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        headers
     }
 }
 
@@ -217,4 +242,28 @@ fn detect_root_dir() -> Result<PathBuf> {
 
 fn looks_like_repo_root(path: &Path) -> bool {
     path.join("package.json").is_file() && path.join("apps/web/public").is_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_trusted_auth_headers;
+
+    #[test]
+    fn parse_trusted_auth_headers_uses_defaults_when_value_missing() {
+        assert_eq!(
+            parse_trusted_auth_headers(None),
+            vec![
+                "x-auth-request-user".to_owned(),
+                "x-forwarded-user".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_trusted_auth_headers_normalizes_custom_values() {
+        assert_eq!(
+            parse_trusted_auth_headers(Some(" X-Custom-User , x-another-header ".to_owned())),
+            vec!["x-custom-user".to_owned(), "x-another-header".to_owned()]
+        );
+    }
 }

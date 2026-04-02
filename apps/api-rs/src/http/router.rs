@@ -4,6 +4,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use serde::Serialize;
 use tower_http::services::ServeDir;
 
 use crate::http::handlers::health::{healthz, readyz};
@@ -12,8 +13,7 @@ use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     let static_dir = state.config.static_dir();
-
-    Router::new()
+    let protected_routes = Router::new()
         .route("/api/jobs", get(list_jobs))
         .route("/api/clusters", get(get_clusters))
         .route(
@@ -21,9 +21,13 @@ pub fn build_router(state: AppState) -> Router {
             get(get_job_by_locator),
         )
         .route("/api/jobs/{id}", get(get_job_by_id))
+        .route("/metrics", get(metrics))
+        .route_layer(from_fn_with_state(state.clone(), require_trusted_auth));
+
+    Router::new()
+        .merge(protected_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
         .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
         .layer(from_fn_with_state(state.clone(), track_requests))
         .with_state(state)
@@ -31,6 +35,37 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.metrics.snapshot().await)
+}
+
+#[derive(Serialize)]
+struct AuthErrorResponse {
+    error: &'static str,
+}
+
+async fn require_trusted_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.fixture_mode
+        || state.config.trusted_auth_headers.iter().any(|header_name| {
+            request
+                .headers()
+                .get(header_name.as_str())
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    {
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(AuthErrorResponse {
+            error: "Missing trusted auth header",
+        }),
+    )
+        .into_response()
 }
 
 async fn track_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -78,7 +113,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::{Json, Router};
-    use reqwest::Client;
+    use reqwest::{Client, RequestBuilder};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -86,6 +121,9 @@ mod tests {
     use super::build_router;
     use crate::config::{AppConfig, ClusterConfig};
     use crate::state::AppState;
+
+    const TRUSTED_AUTH_HEADER: &str = "x-auth-request-user";
+    const TRUSTED_AUTH_VALUE: &str = "developer@example.com";
 
     #[tokio::test]
     async fn live_mode_end_to_end_preserves_api_contract_against_mocked_upstreams() {
@@ -138,30 +176,10 @@ mod tests {
             ),
         ])
         .await;
-        let app = start_app(AppConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            root_dir: workspace_root(),
-            fixture_mode: false,
-            fixture_file: workspace_root().join("fixtures/jobs.json"),
-            cache_ttl_ms: 0,
-            request_timeout_ms: 1_000,
-            clusters: vec![ClusterConfig {
-                name: "demo".to_owned(),
-                api_url: kubernetes.base_url.clone(),
-                bearer_token: "token".to_owned(),
-                ca_cert: None,
-                insecure_skip_tls_verify: false,
-                namespaces: vec!["analytics".to_owned()],
-                flink_api_version: "v1beta1".to_owned(),
-                flink_rest_base_url: None,
-            }],
-        })
-        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
         let client = Client::new();
 
-        let jobs_response = client
-            .get(format!("{}/api/jobs", app.base_url))
+        let jobs_response = authorized(client.get(format!("{}/api/jobs", app.base_url)))
             .send()
             .await
             .expect("jobs response should succeed");
@@ -177,8 +195,7 @@ mod tests {
         assert_eq!(jobs_payload["jobs"][0]["warnings"], json!([]));
         assert!(jobs_payload["jobs"][0]["details"]["flinkRestOverview"].is_object());
 
-        let clusters_response = client
-            .get(format!("{}/api/clusters", app.base_url))
+        let clusters_response = authorized(client.get(format!("{}/api/clusters", app.base_url)))
             .send()
             .await
             .expect("clusters response should succeed");
@@ -189,14 +206,13 @@ mod tests {
             .expect("clusters payload should be JSON");
         assert_eq!(clusters_payload, json!({"clusters":[{"name":"demo"}]}));
 
-        let detail_response = client
-            .get(format!(
-                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
-                app.base_url
-            ))
-            .send()
-            .await
-            .expect("detail response should succeed");
+        let detail_response = authorized(client.get(format!(
+            "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+            app.base_url
+        )))
+        .send()
+        .await
+        .expect("detail response should succeed");
         assert_eq!(detail_response.status(), StatusCode::OK);
         let detail_payload: Value = detail_response
             .json()
@@ -213,8 +229,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
-        let metrics_response = client
-            .get(format!("{}/metrics", app.base_url))
+        let metrics_response = authorized(client.get(format!("{}/metrics", app.base_url)))
             .send()
             .await
             .expect("metrics response should succeed");
@@ -249,30 +264,10 @@ mod tests {
             json!({"error":"forbidden"}),
         )])
         .await;
-        let app = start_app(AppConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            root_dir: workspace_root(),
-            fixture_mode: false,
-            fixture_file: workspace_root().join("fixtures/jobs.json"),
-            cache_ttl_ms: 0,
-            request_timeout_ms: 1_000,
-            clusters: vec![ClusterConfig {
-                name: "demo".to_owned(),
-                api_url: kubernetes.base_url.clone(),
-                bearer_token: "token".to_owned(),
-                ca_cert: None,
-                insecure_skip_tls_verify: false,
-                namespaces: vec!["analytics".to_owned()],
-                flink_api_version: "v1beta1".to_owned(),
-                flink_rest_base_url: None,
-            }],
-        })
-        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
         let client = Client::new();
 
-        let response = client
-            .get(format!("{}/api/jobs", app.base_url))
+        let response = authorized(client.get(format!("{}/api/jobs", app.base_url)))
             .send()
             .await
             .expect("response should succeed");
@@ -472,6 +467,63 @@ mod tests {
         app.shutdown();
     }
 
+    #[tokio::test]
+    async fn live_mode_requires_trusted_auth_headers_for_protected_routes() {
+        let flink = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({"jobs":[]}),
+        )])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
+        let client = Client::new();
+
+        for path in ["/api/jobs", "/api/clusters", "/metrics"] {
+            let response = client
+                .get(format!("{}{}", app.base_url, path))
+                .send()
+                .await
+                .expect("unauthorized response should succeed");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let payload: Value = response.json().await.expect("payload should be JSON");
+            assert_eq!(payload, json!({"error":"Missing trusted auth header"}));
+        }
+
+        let detail_response = client
+            .get(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("detail unauthorized response should succeed");
+        assert_eq!(detail_response.status(), StatusCode::UNAUTHORIZED);
+
+        let healthz_response = client
+            .get(format!("{}/healthz", app.base_url))
+            .send()
+            .await
+            .expect("healthz response should succeed");
+        assert_eq!(healthz_response.status(), StatusCode::OK);
+
+        app.shutdown();
+        kubernetes.shutdown();
+        flink.shutdown();
+    }
+
     struct RunningServer {
         base_url: String,
         task: JoinHandle<()>,
@@ -551,8 +603,36 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            trusted_auth_headers: vec![TRUSTED_AUTH_HEADER.to_owned()],
             clusters: Vec::new(),
         }
+    }
+
+    fn live_config(kubernetes_base_url: &str, flink_base_url: Option<&str>) -> AppConfig {
+        AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            trusted_auth_headers: vec![TRUSTED_AUTH_HEADER.to_owned()],
+            clusters: vec![ClusterConfig {
+                name: "demo".to_owned(),
+                api_url: kubernetes_base_url.to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: false,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                flink_rest_base_url: flink_base_url.map(ToOwned::to_owned),
+            }],
+        }
+    }
+
+    fn authorized(request: RequestBuilder) -> RequestBuilder {
+        request.header(TRUSTED_AUTH_HEADER, TRUSTED_AUTH_VALUE)
     }
 
     fn load_fixture_jobs() -> Vec<Value> {
