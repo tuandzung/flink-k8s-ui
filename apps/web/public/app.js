@@ -35,7 +35,9 @@ async function loadJobs() {
 
     if (!response.ok) {
       const message = payload.details || payload.error || 'Unknown error';
-      throw new Error(`${response.status}: ${message}`);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
 
     state.jobs = payload.jobs;
@@ -48,7 +50,8 @@ async function loadJobs() {
 
     render();
   } catch (error) {
-    const noAccess = error.message.includes('401') || error.message.includes('403');
+    const status = error && typeof error === 'object' ? error.status : undefined;
+    const noAccess = status === 401 || status === 403;
     elements.content.innerHTML = `
       <div class="${noAccess ? 'empty-state' : 'error-state'}">
         <strong>${noAccess ? 'No access to Flink resources.' : 'Failed to load jobs.'}</strong>
