@@ -4,8 +4,9 @@ metadata:
   name: flink-job-ui
   annotations:
     flink-job-ui.io/runtime: rust
-    flink-job-ui.io/auth-owner: upstream-ingress
-    flink-job-ui.io/metrics-policy: protected-or-internal-only
+    flink-job-ui.io/auth-owner: app-oidc-session
+    flink-job-ui.io/metrics-policy: internal-service-only
+    flink-job-ui.io/public-surface: signed-out-shell-auth-and-api
 spec:
   replicas: 1
   selector:
@@ -17,7 +18,7 @@ spec:
         app: flink-job-ui
         app.kubernetes.io/runtime: rust
       annotations:
-        flink-job-ui.io/auth-owner: upstream-ingress
+        flink-job-ui.io/auth-owner: app-oidc-session
     spec:
       serviceAccountName: flink-job-ui
       containers:
@@ -31,10 +32,39 @@ spec:
               value: "3000"
             - name: FIXTURE_MODE
               value: "false"
+            - name: OIDC_ISSUER_URL
+              value: "https://accounts.example.com/realms/platform"
+            - name: OIDC_CLIENT_ID
+              value: "flink-job-ui"
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: flink-job-ui-oidc
+                  key: client-secret
+            - name: OIDC_EXTERNAL_BASE_URL
+              value: "https://flink-jobs.example.com"
+            - name: OIDC_CALLBACK_PATH
+              value: "/auth/callback"
+            - name: OIDC_SCOPES
+              value: "openid profile email"
+            - name: SESSION_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: flink-job-ui-oidc
+                  key: session-secret
+            - name: SESSION_TTL_SECS
+              value: "28800"
+            - name: SESSION_SECURE_COOKIE
+              value: "true"
+            - name: TRUST_PROXY_HEADERS
+              value: "true"
             - name: WATCH_NAMESPACES
               value: "analytics,payments"
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
+          # The same container port serves the signed-out shell, auth callbacks, and
+          # authenticated API traffic. Expose /metrics only through the internal service.
           readinessProbe:
             httpGet:
               path: /readyz

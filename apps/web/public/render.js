@@ -179,9 +179,102 @@ export function renderDrawer(job) {
   `;
 }
 
+export function renderSessionChrome(session) {
+  const tone = session.authenticated || session.status === 'legacy' ? 'status-running' : 'status-unknown';
+  const label =
+    session.authenticated || session.status === 'legacy'
+      ? session.user?.name || session.user?.email || 'Signed in'
+      : session.status === 'loading'
+        ? 'Checking session'
+        : 'Signed out';
+  const detail =
+    session.authenticated || session.status === 'legacy'
+      ? session.user?.email || 'Session active'
+      : session.status === 'loading'
+        ? 'Loading authentication status…'
+        : 'Sign in to view protected job data';
+
+  return `
+    <div class="session-chip">
+      <span class="status-badge ${tone}">${escapeHtml(label)}</span>
+      <span class="muted">${escapeHtml(detail)}</span>
+    </div>
+    <div class="session-actions">
+      ${renderSessionAction(session)}
+    </div>
+  `;
+}
+
+export function renderAuthLoading() {
+  return `
+    <div class="auth-card">
+      <p class="eyebrow">Authentication</p>
+      <h2>Checking session…</h2>
+      <p class="muted">We’re verifying whether you already have an active session before loading Flink job data.</p>
+    </div>
+  `;
+}
+
+export function renderSignedOutShell(session = {}) {
+  const title = session.title || 'Sign in to view Flink jobs';
+  const message =
+    session.message ||
+    'This dashboard only loads cluster and job details after the server confirms an authenticated session.';
+  const loginUrl = session.loginUrl || '/auth/login';
+
+  return `
+    <div class="auth-card auth-card-prominent">
+      <p class="eyebrow">Authentication required</p>
+      <h2>${escapeHtml(title)}</h2>
+      <p class="muted">${escapeHtml(message)}</p>
+      <div class="auth-actions">
+        <a class="primary-button" href="${loginUrl}">Sign in</a>
+      </div>
+    </div>
+  `;
+}
+
+export function renderAuthError(session = {}) {
+  const message = session.error || 'Authentication status could not be determined.';
+
+  return `
+    <div class="auth-card auth-card-error">
+      <p class="eyebrow">Authentication error</p>
+      <h2>We could not verify your session</h2>
+      <p class="muted">${escapeHtml(message)}</p>
+      <div class="auth-actions">
+        <a class="primary-button" href="${session.loginUrl || '/auth/login'}">Try signing in again</a>
+      </div>
+    </div>
+  `;
+}
+
+function renderSessionAction(session) {
+  if (session.authenticated || session.status === 'legacy') {
+    return `
+      <form method="post" action="${session.logoutUrl || '/auth/logout'}">
+        ${
+          session.csrfToken
+            ? `<input type="hidden" name="csrfToken" value="${escapeHtml(session.csrfToken)}" />`
+            : ''
+        }
+        <button class="secondary-button" type="submit">Sign out</button>
+      </form>
+    `;
+  }
+
+  if (session.status === 'loading') {
+    return '';
+  }
+
+  return `<a class="primary-button" href="${session.loginUrl || '/auth/login'}">Sign in</a>`;
+}
+
 function escapeHtml(value) {
-  return value
+  return String(value)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }

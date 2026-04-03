@@ -2,10 +2,27 @@ apiVersion: v1
 kind: Service
 metadata:
   name: flink-job-ui
+  annotations:
+    flink-job-ui.io/public-surface: signed-out-shell-auth-and-api
 spec:
   selector:
     app: flink-job-ui
   ports:
     - name: http
       port: 80
+      targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-job-ui-metrics
+  annotations:
+    flink-job-ui.io/internal-only: "true"
+    flink-job-ui.io/scrape-surface: metrics
+spec:
+  selector:
+    app: flink-job-ui
+  ports:
+    - name: metrics
+      port: 3000
       targetPort: 3000

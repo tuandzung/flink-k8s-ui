@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   filterJobs,
+  renderAuthError,
+  renderAuthLoading,
   renderDrawer,
+  renderSessionChrome,
+  renderSignedOutShell,
   renderSummary,
   renderTable,
   renderWarnings
@@ -37,7 +41,7 @@ test('renderDrawer includes warnings and sanitized status details', () => {
   const html = renderDrawer(fixture.jobs[3]);
   assert.match(html, /Restart backoff exceeded on JobManager/);
   assert.match(html, /Status details/);
-  assert.match(html, /"statusSummary"/);
+  assert.match(html, /&quot;statusSummary&quot;/);
   assert.doesNotMatch(html, /"metadata"/);
   assert.doesNotMatch(html, /"spec"/);
 });
@@ -45,4 +49,42 @@ test('renderDrawer includes warnings and sanitized status details', () => {
 test('renderWarnings highlights partial enrichment state', () => {
   const html = renderWarnings(fixture.jobs);
   assert.match(html, /partial enrichment warnings/);
+});
+
+test('renderSignedOutShell renders sign-in call to action', () => {
+  const html = renderSignedOutShell({
+    loginUrl: '/auth/login',
+    title: 'Sign in required',
+    message: 'Protected dashboard'
+  });
+
+  assert.match(html, /Sign in required/);
+  assert.match(html, /Protected dashboard/);
+  assert.match(html, /href="\/auth\/login"/);
+  assert.match(html, />Sign in</);
+});
+
+test('renderAuthLoading and renderAuthError expose bootstrap states', () => {
+  assert.match(renderAuthLoading(), /Checking session/);
+
+  const errorHtml = renderAuthError({
+    error: 'OIDC discovery failed',
+    loginUrl: '/auth/login'
+  });
+  assert.match(errorHtml, /OIDC discovery failed/);
+  assert.match(errorHtml, /Try signing in again/);
+});
+
+test('renderSessionChrome shows signed-in identity and sign-out action', () => {
+  const html = renderSessionChrome({
+    status: 'authenticated',
+    authenticated: true,
+    user: { name: 'Ada Lovelace', email: 'ada@example.com' },
+    logoutUrl: '/auth/logout'
+  });
+
+  assert.match(html, /Ada Lovelace/);
+  assert.match(html, /ada@example.com/);
+  assert.match(html, /form method="post" action="\/auth\/logout"/);
+  assert.match(html, />Sign out</);
 });
