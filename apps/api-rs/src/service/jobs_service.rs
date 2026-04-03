@@ -124,7 +124,15 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
-            trusted_auth_headers: vec!["x-auth-request-user".to_owned()],
+            oidc: None,
+            session: crate::config::SessionConfig {
+                cookie_name: "session".to_owned(),
+                auth_flow_cookie_name: "session-flow".to_owned(),
+                cookie_secret: "0123456789abcdef0123456789abcdef".to_owned(),
+                ttl_secs: 60,
+                auth_flow_ttl_secs: 60,
+                secure_cookie: false,
+            },
             clusters: Vec::new(),
         }
     }

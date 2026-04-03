@@ -2,12 +2,14 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 const SERVICE_ACCOUNT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-const DEFAULT_TRUSTED_AUTH_HEADERS: [&str; 2] = ["x-auth-request-user", "x-forwarded-user"];
+const DEFAULT_CALLBACK_PATH: &str = "/auth/callback";
+const DEFAULT_SESSION_COOKIE_NAME: &str = "flink_job_ui_session";
+const DEFAULT_AUTH_FLOW_COOKIE_NAME: &str = "flink_job_ui_auth_flow";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -18,8 +20,29 @@ pub struct AppConfig {
     pub fixture_file: PathBuf,
     pub cache_ttl_ms: u64,
     pub request_timeout_ms: u64,
-    pub trusted_auth_headers: Vec<String>,
+    pub oidc: Option<OidcConfig>,
+    pub session: SessionConfig,
     pub clusters: Vec<ClusterConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub external_base_url: String,
+    pub callback_path: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionConfig {
+    pub cookie_name: String,
+    pub auth_flow_cookie_name: String,
+    pub cookie_secret: String,
+    pub ttl_secs: i64,
+    pub auth_flow_ttl_secs: i64,
+    pub secure_cookie: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -46,16 +69,13 @@ impl AppConfig {
         } else {
             configured_clusters
         };
-        let fixture_mode = parse_bool(
-            env::var("FIXTURE_MODE").ok().as_deref(),
-            clusters.is_empty(),
-        ) || clusters.is_empty();
+        let fixture_mode = parse_bool(env::var("FIXTURE_MODE").ok().as_deref(), false);
         let fixture_file = root_dir
             .join(env::var("FIXTURE_FILE").unwrap_or_else(|_| "fixtures/jobs.json".to_owned()));
-        let trusted_auth_headers =
-            parse_trusted_auth_headers(env::var("AUTH_TRUSTED_HEADERS").ok());
+        let oidc = OidcConfig::from_env()?;
+        let session = SessionConfig::from_env();
 
-        Ok(Self {
+        let config = Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
             port: env::var("PORT")
                 .ok()
@@ -72,13 +92,104 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4_000),
-            trusted_auth_headers,
+            oidc,
+            session,
             clusters,
-        })
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !self.fixture_mode && self.clusters.is_empty() {
+            bail!("fixture mode is disabled but no Kubernetes clusters are configured")
+        }
+
+        if !self.fixture_mode {
+            let Some(oidc) = &self.oidc else {
+                bail!("fixture mode is disabled but OIDC settings are missing")
+            };
+
+            if oidc.scopes.is_empty() {
+                bail!("OIDC scopes must include at least openid")
+            }
+            if self.session.cookie_secret.len() < 32 {
+                bail!("SESSION_COOKIE_SECRET must be at least 32 characters long")
+            }
+        }
+
+        Ok(())
     }
 
     pub fn static_dir(&self) -> PathBuf {
         self.root_dir.join("apps/web/public")
+    }
+
+    pub fn index_html_path(&self) -> PathBuf {
+        self.static_dir().join("index.html")
+    }
+    pub fn oidc_callback_url(&self) -> Option<String> {
+        self.oidc
+            .as_ref()
+            .map(|oidc| format!("{}{}", oidc.external_base_url, oidc.callback_path))
+    }
+}
+
+impl OidcConfig {
+    fn from_env() -> Result<Option<Self>> {
+        let issuer_url = env::var("OIDC_ISSUER_URL").ok();
+        let client_id = env::var("OIDC_CLIENT_ID").ok();
+        let client_secret = env::var("OIDC_CLIENT_SECRET").ok();
+        let external_base_url = env::var("OIDC_EXTERNAL_BASE_URL").ok();
+
+        if issuer_url.is_none()
+            && client_id.is_none()
+            && client_secret.is_none()
+            && external_base_url.is_none()
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            issuer_url: normalize_base_url(
+                &issuer_url.context("OIDC_ISSUER_URL is required when OIDC auth is enabled")?,
+            )?,
+            client_id: client_id.context("OIDC_CLIENT_ID is required when OIDC auth is enabled")?,
+            client_secret: client_secret
+                .context("OIDC_CLIENT_SECRET is required when OIDC auth is enabled")?,
+            external_base_url: normalize_base_url(
+                &external_base_url
+                    .context("OIDC_EXTERNAL_BASE_URL is required when OIDC auth is enabled")?,
+            )?,
+            callback_path: normalize_callback_path(
+                &env::var("OIDC_CALLBACK_PATH")
+                    .unwrap_or_else(|_| DEFAULT_CALLBACK_PATH.to_owned()),
+            ),
+            scopes: parse_scopes(env::var("OIDC_SCOPES").ok()),
+        }))
+    }
+}
+
+impl SessionConfig {
+    fn from_env() -> Self {
+        Self {
+            cookie_name: env::var("SESSION_COOKIE_NAME")
+                .unwrap_or_else(|_| DEFAULT_SESSION_COOKIE_NAME.to_owned()),
+            auth_flow_cookie_name: env::var("AUTH_FLOW_COOKIE_NAME")
+                .unwrap_or_else(|_| DEFAULT_AUTH_FLOW_COOKIE_NAME.to_owned()),
+            cookie_secret: env::var("SESSION_COOKIE_SECRET")
+                .unwrap_or_else(|_| "dev-only-session-cookie-secret-change-me-please".to_owned()),
+            ttl_secs: env::var("SESSION_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(8 * 60 * 60),
+            auth_flow_ttl_secs: env::var("AUTH_FLOW_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(5 * 60),
+            secure_cookie: parse_bool(env::var("SESSION_SECURE_COOKIE").ok().as_deref(), true),
+        }
     }
 }
 
@@ -121,23 +232,43 @@ where
     }
 }
 
-fn parse_trusted_auth_headers(value: Option<String>) -> Vec<String> {
-    let headers = value
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
+fn parse_scopes(value: Option<String>) -> Vec<String> {
+    let scopes = value
+        .unwrap_or_else(|| "openid profile email".to_owned())
+        .split(|character: char| character == ' ' || character == ',')
         .map(str::trim)
-        .filter(|header| !header.is_empty())
-        .map(|header| header.to_ascii_lowercase())
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
 
-    if headers.is_empty() {
-        DEFAULT_TRUSTED_AUTH_HEADERS
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+    if scopes.is_empty() {
+        vec![
+            "openid".to_owned(),
+            "profile".to_owned(),
+            "email".to_owned(),
+        ]
     } else {
-        headers
+        scopes
+    }
+}
+
+fn normalize_base_url(value: &str) -> Result<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        bail!("base URL cannot be empty")
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn normalize_callback_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        DEFAULT_CALLBACK_PATH.to_owned()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_owned()
+    } else {
+        format!("/{trimmed}")
     }
 }
 
@@ -246,24 +377,126 @@ fn looks_like_repo_root(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_trusted_auth_headers;
+    use super::{
+        AppConfig, ClusterConfig, OidcConfig, SessionConfig, normalize_base_url,
+        normalize_callback_path, parse_scopes,
+    };
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate should be nested in apps/")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
+    fn session_config() -> SessionConfig {
+        SessionConfig {
+            cookie_name: "session".to_owned(),
+            auth_flow_cookie_name: "session-flow".to_owned(),
+            cookie_secret: "0123456789abcdef0123456789abcdef".to_owned(),
+            ttl_secs: 60,
+            auth_flow_ttl_secs: 60,
+            secure_cookie: false,
+        }
+    }
 
     #[test]
-    fn parse_trusted_auth_headers_uses_defaults_when_value_missing() {
+    fn parse_scopes_uses_openid_defaults() {
         assert_eq!(
-            parse_trusted_auth_headers(None),
+            parse_scopes(None),
             vec![
-                "x-auth-request-user".to_owned(),
-                "x-forwarded-user".to_owned()
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned()
             ]
         );
     }
 
     #[test]
-    fn parse_trusted_auth_headers_normalizes_custom_values() {
+    fn normalize_callback_path_always_has_leading_slash() {
+        assert_eq!(normalize_callback_path("auth/callback"), "/auth/callback");
+        assert_eq!(normalize_callback_path("/auth/callback"), "/auth/callback");
+    }
+
+    #[test]
+    fn normalize_base_url_trims_trailing_slash() {
         assert_eq!(
-            parse_trusted_auth_headers(Some(" X-Custom-User , x-another-header ".to_owned())),
-            vec!["x-custom-user".to_owned(), "x-another-header".to_owned()]
+            normalize_base_url("https://example.com/").expect("base url should normalize"),
+            "https://example.com"
         );
+    }
+
+    #[test]
+    fn live_config_requires_clusters_and_oidc() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc: None,
+            session: session_config(),
+            clusters: Vec::new(),
+        };
+
+        let error = config.validate().expect_err("live mode should fail closed");
+        assert!(!error.to_string().trim().is_empty());
+    }
+
+    #[test]
+    fn fixture_config_can_skip_oidc() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: true,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc: None,
+            session: session_config(),
+            clusters: Vec::new(),
+        };
+
+        config.validate().expect("fixture mode should be allowed");
+    }
+
+    #[test]
+    fn live_config_with_oidc_and_clusters_is_valid() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc: Some(OidcConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "client-id".to_owned(),
+                client_secret: "client-secret".to_owned(),
+                external_base_url: "https://flink.example.com".to_owned(),
+                callback_path: "/auth/callback".to_owned(),
+                scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            }),
+            session: session_config(),
+            clusters: vec![ClusterConfig {
+                name: "demo".to_owned(),
+                api_url: "https://kubernetes.example.com".to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: false,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                flink_rest_base_url: None,
+            }],
+        };
+
+        config.validate().expect("live mode should validate");
     }
 }
