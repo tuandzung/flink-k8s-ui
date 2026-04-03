@@ -132,14 +132,13 @@ pub async fn callback(
         }
         Err(_) => {
             let mut response = Redirect::to("/?authError=callback_failed").into_response();
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&state.auth.clear_session_cookie(&state.config).replace(
-                    &state.config.session.cookie_name,
-                    &state.config.session.auth_flow_cookie_name,
-                ))
-                .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
+            if let Ok(clear_cookie) =
+                HeaderValue::from_str(&state.auth.clear_auth_flow_cookie(&state.config))
+            {
+                response
+                    .headers_mut()
+                    .append(header::SET_COOKIE, clear_cookie);
+            }
             response
         }
     }

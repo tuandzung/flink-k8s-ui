@@ -1,11 +1,7 @@
 import {
   filterJobs,
-  renderAuthError,
-  renderAuthLoading,
   renderDrawer,
   renderFilters,
-  renderSessionChrome,
-  renderSignedOutShell,
   renderSummary,
   renderTable,
   renderWarnings
@@ -163,14 +159,14 @@ async function loadJobs() {
 }
 
 function render() {
-  elements.sessionChrome.innerHTML = renderSessionChrome(state.session);
+  replaceChildren(elements.sessionChrome, renderSessionChromeNode(state.session));
   elements.refreshButton.disabled = state.session.status === 'loading';
 
   if (!canLoadJobs()) {
     elements.filters.innerHTML = '';
     elements.summary.innerHTML = '';
-    elements.drawer.innerHTML = renderSignedOutDrawer(state.session);
-    elements.content.innerHTML = renderSessionState(state.session);
+    replaceChildren(elements.drawer, renderSignedOutDrawerNode(state.session));
+    replaceChildren(elements.content, renderSessionStateNode(state.session));
     return;
   }
 
@@ -202,18 +198,6 @@ function render() {
 
 function canLoadJobs() {
   return state.session.authenticated || state.session.status === 'legacy';
-}
-
-function renderSessionState(session) {
-  if (session.status === 'loading') {
-    return renderAuthLoading();
-  }
-
-  if (session.status === 'error') {
-    return renderAuthError(session);
-  }
-
-  return renderSignedOutShell(session);
 }
 
 function renderSignedOutDrawer(session) {
@@ -251,6 +235,154 @@ async function readJson(response) {
   } catch {
     return {};
   }
+}
+
+function replaceChildren(element, ...nodes) {
+  element.replaceChildren(...nodes.filter(Boolean));
+}
+
+function renderSessionChromeNode(session) {
+  const wrapper = document.createDocumentFragment();
+  const chip = document.createElement('div');
+  chip.className = 'session-chip';
+
+  const badge = document.createElement('span');
+  badge.className = `status-badge ${session.authenticated || session.status === 'legacy' ? 'status-running' : 'status-unknown'}`;
+  badge.textContent =
+    session.authenticated || session.status === 'legacy'
+      ? session.user?.name || session.user?.email || 'Signed in'
+      : session.status === 'loading'
+        ? 'Checking session'
+        : 'Signed out';
+
+  const detail = document.createElement('span');
+  detail.className = 'muted';
+  detail.textContent =
+    session.authenticated || session.status === 'legacy'
+      ? session.user?.email || 'Session active'
+      : session.status === 'loading'
+        ? 'Loading authentication status…'
+        : 'Sign in to view protected job data';
+
+  chip.append(badge, detail);
+  wrapper.append(chip);
+
+  const actions = document.createElement('div');
+  actions.className = 'session-actions';
+  const actionNode = renderSessionActionNode(session);
+  if (actionNode) {
+    actions.append(actionNode);
+  }
+  wrapper.append(actions);
+
+  return wrapper;
+}
+
+function renderSessionActionNode(session) {
+  if (session.authenticated || session.status === 'legacy') {
+    const form = document.createElement('form');
+    form.method = 'post';
+    form.action = session.logoutUrl || '/auth/logout';
+
+    if (session.csrfToken) {
+      const csrfInput = document.createElement('input');
+      csrfInput.type = 'hidden';
+      csrfInput.name = 'csrfToken';
+      csrfInput.value = session.csrfToken;
+      form.append(csrfInput);
+    }
+
+    const button = document.createElement('button');
+    button.className = 'secondary-button';
+    button.type = 'submit';
+    button.textContent = 'Sign out';
+    form.append(button);
+    return form;
+  }
+
+  if (session.status === 'loading') {
+    return null;
+  }
+
+  const link = document.createElement('a');
+  link.className = 'primary-button';
+  link.href = session.loginUrl || '/auth/login';
+  link.textContent = 'Sign in';
+  return link;
+}
+
+function renderSignedOutDrawerNode(session) {
+  const paragraph = document.createElement('p');
+  paragraph.className = 'muted';
+
+  if (session.status === 'loading') {
+    paragraph.textContent = 'Waiting for session bootstrap before loading dashboard details.';
+    return paragraph;
+  }
+
+  if (session.status === 'error') {
+    paragraph.textContent = 'Retry authentication to continue to the protected dashboard.';
+    return paragraph;
+  }
+
+  paragraph.textContent =
+    'Sign in to inspect deployment details, warnings, and cluster-specific job status.';
+  return paragraph;
+}
+
+function renderSessionStateNode(session) {
+  const wrapper = document.createElement('div');
+  wrapper.className =
+    session.status === 'error'
+      ? 'auth-card auth-card-error'
+      : session.status === 'signed-out'
+        ? 'auth-card auth-card-prominent'
+        : 'auth-card';
+
+  const eyebrow = document.createElement('p');
+  eyebrow.className = 'eyebrow';
+
+  const title = document.createElement('h2');
+  const message = document.createElement('p');
+  message.className = 'muted';
+  const actions = document.createElement('div');
+  actions.className = 'auth-actions';
+
+  if (session.status === 'loading') {
+    eyebrow.textContent = 'Authentication';
+    title.textContent = 'Checking session…';
+    message.textContent =
+      'We’re verifying whether you already have an active session before loading Flink job data.';
+  } else if (session.status === 'error') {
+    eyebrow.textContent = 'Authentication error';
+    title.textContent = 'We could not verify your session';
+    message.textContent = session.error || 'Authentication status could not be determined.';
+
+    const retryLink = document.createElement('a');
+    retryLink.className = 'primary-button';
+    retryLink.href = session.loginUrl || '/auth/login';
+    retryLink.textContent = 'Try signing in again';
+    actions.append(retryLink);
+  } else {
+    eyebrow.textContent = 'Authentication required';
+    title.textContent = session.title || 'Sign in to view Flink jobs';
+    message.textContent =
+      session.message ||
+      'This dashboard only loads cluster and job details after the server confirms an authenticated session.';
+
+    const signInLink = document.createElement('a');
+    signInLink.className = 'primary-button';
+    signInLink.href = session.loginUrl || '/auth/login';
+    signInLink.textContent = 'Sign in';
+    actions.append(signInLink);
+  }
+
+  wrapper.append(eyebrow, title, message);
+  if (actions.childNodes.length > 0) {
+    wrapper.append(actions);
+  }
+
+  return wrapper;
 }
 
 elements.refreshButton.addEventListener('click', bootstrapSession);

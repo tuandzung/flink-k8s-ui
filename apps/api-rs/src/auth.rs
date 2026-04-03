@@ -73,7 +73,6 @@ pub struct AuthCallbackQuery {
 #[derive(Clone, Debug)]
 struct PendingLogin {
     pkce_verifier: String,
-    nonce: String,
     expires_at: OffsetDateTime,
 }
 
@@ -87,21 +86,11 @@ struct ProviderMetadata {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    id_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UserInfoResponse {
     sub: String,
-    email: Option<String>,
-    name: Option<String>,
-    preferred_username: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IdTokenClaims {
-    sub: String,
-    nonce: Option<String>,
     email: Option<String>,
     name: Option<String>,
     preferred_username: Option<String>,
@@ -137,7 +126,6 @@ impl AuthService {
         let flow_id = random_token(32);
         let state_token = sign_token(&config.session, &flow_id)?;
         let pkce_verifier = random_token(48);
-        let nonce = random_token(32);
 
         self.cleanup_pending_logins(config.session.auth_flow_ttl_secs)
             .await;
@@ -145,7 +133,6 @@ impl AuthService {
             flow_id.clone(),
             PendingLogin {
                 pkce_verifier: pkce_verifier.clone(),
-                nonce: nonce.clone(),
                 expires_at: OffsetDateTime::now_utc()
                     + time::Duration::seconds(config.session.auth_flow_ttl_secs),
             },
@@ -165,7 +152,6 @@ impl AuthService {
             )
             .append_pair("scope", &oidc.scopes.join(" "))
             .append_pair("state", &state_token)
-            .append_pair("nonce", &nonce)
             .append_pair("code_challenge", &pkce_challenge(&pkce_verifier))
             .append_pair("code_challenge_method", "S256");
 
@@ -234,28 +220,7 @@ impl AuthService {
         )
         .await?;
 
-        let id_token_claims = token_response
-            .id_token
-            .as_deref()
-            .map(parse_id_token_claims)
-            .transpose()?;
-        if let Some(claims) = &id_token_claims {
-            let nonce = claims
-                .nonce
-                .as_deref()
-                .context("OIDC id_token is missing nonce")?;
-            if nonce != pending.nonce {
-                bail!("OIDC nonce mismatch")
-            }
-        }
-
-        let user = fetch_user(
-            &self.client,
-            &metadata,
-            &token_response.access_token,
-            id_token_claims.as_ref(),
-        )
-        .await?;
+        let user = fetch_user(&self.client, &metadata, &token_response.access_token).await?;
 
         let session_id = random_token(32);
         let csrf_token = random_token(32);
@@ -348,6 +313,13 @@ impl AuthService {
         clear_cookie(&config.session.cookie_name, config.session.secure_cookie)
     }
 
+    pub fn clear_auth_flow_cookie(&self, config: &AppConfig) -> String {
+        clear_cookie(
+            &config.session.auth_flow_cookie_name,
+            config.session.secure_cookie,
+        )
+    }
+
     #[cfg(test)]
     pub async fn issue_test_session(&self, config: &AppConfig) -> Result<(String, String)> {
         let session_id = random_token(32);
@@ -411,7 +383,8 @@ impl AuthService {
     }
 
     async fn cleanup_pending_logins(&self, auth_flow_ttl_secs: i64) {
-        let now = OffsetDateTime::now_utc() - time::Duration::seconds(auth_flow_ttl_secs.max(0));
+        let _ = auth_flow_ttl_secs;
+        let now = OffsetDateTime::now_utc();
         self.pending_logins
             .write()
             .await
@@ -530,43 +503,27 @@ async fn fetch_user(
     client: &reqwest::Client,
     metadata: &ProviderMetadata,
     access_token: &str,
-    id_token_claims: Option<&IdTokenClaims>,
 ) -> Result<SessionUser> {
-    if let Some(userinfo_endpoint) = &metadata.userinfo_endpoint {
-        let response = client
-            .get(userinfo_endpoint)
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .context("failed to fetch OIDC userinfo")?;
-        let response = response
-            .error_for_status()
-            .context("OIDC userinfo request failed")?;
-        let userinfo = response
-            .json::<UserInfoResponse>()
-            .await
-            .context("failed to decode OIDC userinfo response")?;
-        return Ok(SessionUser {
-            subject: userinfo.sub,
-            email: userinfo.email,
-            name: userinfo.name.or(userinfo.preferred_username),
-        });
-    }
-
-    let claims = id_token_claims.context("OIDC provider did not expose userinfo or id_token")?;
+    let userinfo_endpoint = metadata
+        .userinfo_endpoint
+        .as_ref()
+        .context("OIDC provider did not expose a userinfo endpoint")?;
+    let response = client
+        .get(userinfo_endpoint)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("failed to fetch OIDC userinfo")?;
+    let response = response
+        .error_for_status()
+        .context("OIDC userinfo request failed")?;
+    let userinfo = response
+        .json::<UserInfoResponse>()
+        .await
+        .context("failed to decode OIDC userinfo response")?;
     Ok(SessionUser {
-        subject: claims.sub.clone(),
-        email: claims.email.clone(),
-        name: claims.name.clone().or(claims.preferred_username.clone()),
+        subject: userinfo.sub,
+        email: userinfo.email,
+        name: userinfo.name.or(userinfo.preferred_username),
     })
-}
-
-fn parse_id_token_claims(id_token: &str) -> Result<IdTokenClaims> {
-    let mut segments = id_token.split('.');
-    let _header = segments.next().context("OIDC id_token header missing")?;
-    let payload = segments.next().context("OIDC id_token payload missing")?;
-    let decoded = URL_SAFE_NO_PAD
-        .decode(payload)
-        .context("OIDC id_token payload is not valid base64url")?;
-    serde_json::from_slice(&decoded).context("OIDC id_token payload is not valid JSON")
 }
