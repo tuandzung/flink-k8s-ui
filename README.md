@@ -19,8 +19,10 @@ This project serves a lightweight dashboard that aggregates `FlinkDeployment` an
 - **UI:** static assets under `apps/web/public`
 - **Default local entrypoint:** `npm run dev`
 - **Default production-style entrypoint:** `npm start`
-- **Production auth model:** upstream ingress or reverse proxy is expected to authenticate requests before they reach the app
-- **Protected production routes:** `/api/*` and `/metrics`
+- **Production auth model:** the Rust service owns OIDC login and same-origin session auth
+- **Protected production routes:** `/api/*`
+- **Public auth/session routes:** `/auth/login`, `/auth/callback`, `/auth/logout`, `/api/session`, and the signed-out shell at `/`
+- **Operational metrics route:** `/metrics` should stay on an internal-only service path
 - **Always-open operational routes:** `/healthz`, `/readyz`
 
 There is **no separate Node backend runtime path** anymore. Node is used for the frontend test harness and helper scripts.
@@ -119,6 +121,15 @@ Example with `FLINK_UI_CLUSTERS_JSON`:
 
 ```bash
 export FIXTURE_MODE=false
+export OIDC_ISSUER_URL='https://accounts.example.com/realms/platform'
+export OIDC_CLIENT_ID='flink-job-ui'
+export OIDC_CLIENT_SECRET='replace-me'
+export OIDC_EXTERNAL_BASE_URL='https://flink-jobs.example.com'
+export OIDC_CALLBACK_PATH='/auth/callback'
+export OIDC_SCOPES='openid profile email'
+export OIDC_REQUEST_TIMEOUT_MS='15000'
+export SESSION_COOKIE_SECRET='replace-with-32-byte-secret'
+export SESSION_SECURE_COOKIE=true
 export FLINK_UI_CLUSTERS_JSON='[
   {
     "name": "prod",
@@ -212,6 +223,13 @@ This performs:
 - `GET /api/clusters` — list distinct cluster names
 - `GET /api/jobs/{id}` — fetch a job by synthetic ID
 - `GET /api/jobs/{cluster}/{namespace}/{kind}/{name}` — fetch a job by locator
+- `GET /api/session` — session bootstrap status for the frontend gate
+
+### Auth/session routes
+
+- `GET /auth/login` — start the OIDC authorization-code flow
+- `GET /auth/callback` — complete the OIDC callback and mint the app session
+- `POST /auth/logout` — clear the current app session
 
 ### Operational routes
 
@@ -221,36 +239,46 @@ This performs:
 
 ## Auth and security model
 
-The app currently expects **upstream auth ownership** in production.
+The app expects **application-owned OIDC/session auth** in production.
 
-- the Rust service does **not** perform end-user login or SSO itself
-- `/api/*` and `/metrics` are protected by a trusted-header gate in live mode
-- by default, trusted headers are:
-  - `x-auth-request-user`
-  - `x-forwarded-user`
-- ingress/reverse proxy should inject one of those headers after authenticating the caller
-- fixture mode bypasses the gate for local development
+- the Rust service performs end-user login itself via the OIDC authorization-code flow
+- `/auth/login`, `/auth/callback`, and `/auth/logout` manage the browser-facing auth flow
+- `/api/session` lets the static UI determine whether to render the signed-out shell, loading state, or authenticated dashboard boot
+- `/api/*` is protected by the app-owned same-origin session instead of ingress-injected auth headers
+- the deployment must set a canonical external base URL so login redirects and callback handling stay correct behind the public host
+- OIDC discovery/token/userinfo calls use a dedicated auth timeout so slow identity-provider handshakes do not inherit the tighter Kubernetes/Flink upstream timeout budget
+- fixture mode bypasses OIDC only for explicit local-development runs
 
 ### Important deployment note
 
-Do **not** expose `/metrics` anonymously. Keep it:
+Do **not** expose `/metrics` on the public ingress. Keep it:
 
-- behind the same trusted ingress auth boundary, or
-- on a separate internal-only scrape path
+- on a separate internal-only service or scrape path, or
+- behind a dedicated operations-only boundary that does not depend on browser login state
 
 ## Configuration
 
 ### Core runtime variables
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `HOST` | bind address | `0.0.0.0` |
-| `PORT` | HTTP port | `3000` |
-| `FIXTURE_MODE` | enable fixture-mode data source | auto-enabled when no live cluster config is present |
-| `FIXTURE_FILE` | path to fixture JSON file | `fixtures/jobs.json` |
-| `CACHE_TTL_MS` | in-memory jobs cache TTL | `5000` |
-| `REQUEST_TIMEOUT_MS` | upstream request timeout | `4000` |
-| `AUTH_TRUSTED_HEADERS` | comma-separated trusted auth header names | `x-auth-request-user,x-forwarded-user` |
+| Variable                 | Purpose                                                     | Default                           |
+| ------------------------ | ----------------------------------------------------------- | --------------------------------- |
+| `HOST`                   | bind address                                                | `0.0.0.0`                         |
+| `PORT`                   | HTTP port                                                   | `3000`                            |
+| `FIXTURE_MODE`           | enable fixture-mode data source for local development only  | `false`                           |
+| `FIXTURE_FILE`           | path to fixture JSON file                                   | `fixtures/jobs.json`              |
+| `CACHE_TTL_MS`           | in-memory jobs cache TTL                                    | `5000`                            |
+| `REQUEST_TIMEOUT_MS`     | upstream request timeout                                    | `4000`                            |
+| `OIDC_ISSUER_URL`        | OIDC issuer/discovery URL                                   | none                              |
+| `OIDC_CLIENT_ID`         | OIDC client identifier                                      | none                              |
+| `OIDC_CLIENT_SECRET`     | OIDC client secret                                          | none                              |
+| `OIDC_EXTERNAL_BASE_URL` | canonical external app URL used for redirects/callbacks     | none                              |
+| `OIDC_CALLBACK_PATH`     | callback route mounted by the app                           | `/auth/callback`                  |
+| `OIDC_SCOPES`            | space-delimited OIDC scopes                                 | `openid profile email`            |
+| `OIDC_REQUEST_TIMEOUT_MS` | timeout for OIDC discovery/token/userinfo HTTP calls       | `max(REQUEST_TIMEOUT_MS, 15000)`  |
+| `SESSION_COOKIE_SECRET`  | secret used to sign/encrypt the app session cookie          | none                              |
+| `SESSION_TTL_SECS`       | app session lifetime                                        | `28800`                           |
+| `SESSION_SECURE_COOKIE`  | mark the session cookie as HTTPS-only                       | `true` in production              |
+| `TRUST_PROXY_HEADERS`    | honor forwarded proto/host headers from the trusted ingress | `false` unless explicitly enabled |
 
 ### Multi-cluster JSON configuration
 
@@ -258,33 +286,33 @@ Use `FLINK_UI_CLUSTERS_JSON` to configure one or more clusters.
 
 Supported object fields:
 
-| Field | Description |
-|---|---|
-| `name` | display name for the cluster |
-| `apiUrl` / `url` | Kubernetes API base URL |
-| `bearerToken` | inline bearer token |
-| `bearerTokenFile` | token file path |
-| `caCert` | inline CA certificate |
-| `caCertFile` | CA certificate file path |
-| `insecureSkipTlsVerify` | disable TLS verification |
-| `namespaces` | watched namespaces |
-| `flinkApiVersion` | Flink operator API version |
-| `flinkRestBaseUrl` | explicit trusted Flink REST base URL |
+| Field                   | Description                          |
+| ----------------------- | ------------------------------------ |
+| `name`                  | display name for the cluster         |
+| `apiUrl` / `url`        | Kubernetes API base URL              |
+| `bearerToken`           | inline bearer token                  |
+| `bearerTokenFile`       | token file path                      |
+| `caCert`                | inline CA certificate                |
+| `caCertFile`            | CA certificate file path             |
+| `insecureSkipTlsVerify` | disable TLS verification             |
+| `namespaces`            | watched namespaces                   |
+| `flinkApiVersion`       | Flink operator API version           |
+| `flinkRestBaseUrl`      | explicit trusted Flink REST base URL |
 
 ### In-cluster/single-cluster environment variables
 
 If `FLINK_UI_CLUSTERS_JSON` is not set, the app can derive a cluster from environment:
 
-| Variable | Purpose |
-|---|---|
-| `K8S_API_URL` | explicit Kubernetes API URL |
-| `K8S_BEARER_TOKEN` | Kubernetes bearer token |
-| `K8S_CA_CERT` | Kubernetes CA certificate |
-| `K8S_CLUSTER_NAME` | cluster display name |
+| Variable                       | Purpose                             |
+| ------------------------------ | ----------------------------------- |
+| `K8S_API_URL`                  | explicit Kubernetes API URL         |
+| `K8S_BEARER_TOKEN`             | Kubernetes bearer token             |
+| `K8S_CA_CERT`                  | Kubernetes CA certificate           |
+| `K8S_CLUSTER_NAME`             | cluster display name                |
 | `K8S_INSECURE_SKIP_TLS_VERIFY` | disable Kubernetes TLS verification |
-| `WATCH_NAMESPACES` | comma-separated namespaces |
-| `FLINK_K8S_API_VERSION` | Flink operator API version |
-| `FLINK_REST_BASE_URL` | trusted Flink REST base URL |
+| `WATCH_NAMESPACES`             | comma-separated namespaces          |
+| `FLINK_K8S_API_VERSION`        | Flink operator API version          |
+| `FLINK_REST_BASE_URL`          | trusted Flink REST base URL         |
 
 If `K8S_API_URL` is not set, the app can derive one from:
 
@@ -356,7 +384,8 @@ The included deployment assumes:
 
 - Rust is the only supported production runtime
 - the app listens on port `3000`
-- ingress or reverse proxy authenticates public traffic
+- the application owns browser-facing OIDC login/session auth in production; ingress should only forward traffic and preserve the canonical HTTPS host
+- `deploy/api/deployment.yaml` is a **local port-forward example** until you replace `OIDC_EXTERNAL_BASE_URL=http://localhost:3000` and `SESSION_SECURE_COOKIE=false` with the real HTTPS ingress settings
 - `/metrics` should not be publicly exposed without protection
 
 ## CI

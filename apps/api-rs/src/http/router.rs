@@ -2,18 +2,40 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, get_service, post};
 use axum::{Json, Router};
 use serde::Serialize;
-use tower_http::services::ServeDir;
+use tower_http::services::ServeFile;
 
+use crate::http::handlers::auth::{callback, login, logout, session_status};
 use crate::http::handlers::health::{healthz, readyz};
 use crate::http::handlers::jobs::{get_clusters, get_job_by_id, get_job_by_locator, list_jobs};
 use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     let static_dir = state.config.static_dir();
-    let protected_routes = Router::new()
+    let public_shell = Router::new()
+        .route_service(
+            "/",
+            get_service(ServeFile::new(state.config.index_html_path())),
+        )
+        .route_service(
+            "/app.js",
+            get_service(ServeFile::new(static_dir.join("app.js"))),
+        )
+        .route_service(
+            "/render.js",
+            get_service(ServeFile::new(static_dir.join("render.js"))),
+        )
+        .route_service(
+            "/styles.css",
+            get_service(ServeFile::new(static_dir.join("styles.css"))),
+        )
+        .route_service(
+            "/favicon.ico",
+            get_service(ServeFile::new(static_dir.join("favicon.ico"))),
+        );
+    let protected_api = Router::new()
         .route("/api/jobs", get(list_jobs))
         .route("/api/clusters", get(get_clusters))
         .route(
@@ -21,14 +43,18 @@ pub fn build_router(state: AppState) -> Router {
             get(get_job_by_locator),
         )
         .route("/api/jobs/{id}", get(get_job_by_id))
-        .route("/metrics", get(metrics))
-        .route_layer(from_fn_with_state(state.clone(), require_trusted_auth));
+        .route_layer(from_fn_with_state(state.clone(), require_session_for_api));
 
     Router::new()
-        .merge(protected_routes)
+        .merge(public_shell)
+        .merge(protected_api)
+        .route("/api/session", get(session_status))
+        .route("/auth/login", get(login))
+        .route("/auth/callback", get(callback))
+        .route("/auth/logout", post(logout))
+        .route("/metrics", get(metrics))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
         .layer(from_fn_with_state(state.clone(), track_requests))
         .with_state(state)
 }
@@ -42,30 +68,36 @@ struct AuthErrorResponse {
     error: &'static str,
 }
 
-async fn require_trusted_auth(
+async fn require_session_for_api(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    if state.config.fixture_mode
-        || state.config.trusted_auth_headers.iter().any(|header_name| {
-            request
-                .headers()
-                .get(header_name.as_str())
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| !value.trim().is_empty())
-        })
-    {
+    if state.config.fixture_mode {
         return next.run(request).await;
     }
 
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(AuthErrorResponse {
-            error: "Missing trusted auth header",
-        }),
-    )
-        .into_response()
+    match state
+        .auth
+        .session_from_headers(&state.config, request.headers())
+        .await
+    {
+        Ok(Some(_)) => next.run(request).await,
+        Ok(None) => (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthErrorResponse {
+                error: "Missing or expired session",
+            }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthErrorResponse {
+                error: "Failed to validate session",
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn track_requests(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -94,6 +126,10 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
         ("GET", Some("/api/clusters")) => "getClusters",
         ("GET", Some("/api/jobs/{id}"))
         | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => "getJob",
+        ("GET", Some("/api/session")) => "sessionStatus",
+        ("GET", Some("/auth/login")) => "authLogin",
+        ("GET", Some("/auth/callback")) => "authCallback",
+        ("POST", Some("/auth/logout")) => "authLogout",
         ("GET", Some("/healthz")) => "healthz",
         ("GET", Some("/readyz")) => "readyz",
         ("GET", Some("/metrics")) => "metrics",
@@ -113,17 +149,14 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::{Json, Router};
-    use reqwest::{Client, RequestBuilder};
+    use reqwest::{Client, RequestBuilder, redirect::Policy};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
     use super::build_router;
-    use crate::config::{AppConfig, ClusterConfig};
+    use crate::config::{AppConfig, ClusterConfig, OidcConfig};
     use crate::state::AppState;
-
-    const TRUSTED_AUTH_HEADER: &str = "x-auth-request-user";
-    const TRUSTED_AUTH_VALUE: &str = "developer@example.com";
 
     #[tokio::test]
     async fn live_mode_end_to_end_preserves_api_contract_against_mocked_upstreams() {
@@ -179,7 +212,7 @@ mod tests {
         let app = start_app(live_config(&kubernetes.base_url, None)).await;
         let client = Client::new();
 
-        let jobs_response = authorized(client.get(format!("{}/api/jobs", app.base_url)))
+        let jobs_response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
             .send()
             .await
             .expect("jobs response should succeed");
@@ -209,10 +242,11 @@ mod tests {
         assert!(jobs_payload["jobs"][0]["details"].get("spec").is_none());
         assert!(jobs_payload["jobs"][0]["details"].get("status").is_none());
 
-        let clusters_response = authorized(client.get(format!("{}/api/clusters", app.base_url)))
-            .send()
-            .await
-            .expect("clusters response should succeed");
+        let clusters_response =
+            authorized(&app, client.get(format!("{}/api/clusters", app.base_url)))
+                .send()
+                .await
+                .expect("clusters response should succeed");
         assert_eq!(clusters_response.status(), StatusCode::OK);
         let clusters_payload: Value = clusters_response
             .json()
@@ -220,10 +254,13 @@ mod tests {
             .expect("clusters payload should be JSON");
         assert_eq!(clusters_payload, json!({"clusters":[{"name":"demo"}]}));
 
-        let detail_response = authorized(client.get(format!(
-            "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
-            app.base_url
-        )))
+        let detail_response = authorized(
+            &app,
+            client.get(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+                app.base_url
+            )),
+        )
         .send()
         .await
         .expect("detail response should succeed");
@@ -243,7 +280,8 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
-        let metrics_response = authorized(client.get(format!("{}/metrics", app.base_url)))
+        let metrics_response = client
+            .get(format!("{}/metrics", app.base_url))
             .send()
             .await
             .expect("metrics response should succeed");
@@ -281,7 +319,7 @@ mod tests {
         let app = start_app(live_config(&kubernetes.base_url, None)).await;
         let client = Client::new();
 
-        let response = authorized(client.get(format!("{}/api/jobs", app.base_url)))
+        let response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
             .send()
             .await
             .expect("response should succeed");
@@ -424,6 +462,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_login_redirects_after_successful_discovery() {
+        let kubernetes = start_empty_kubernetes_server().await;
+        let oidc = start_mock_json_server(vec![(
+            "/.well-known/openid-configuration".to_owned(),
+            StatusCode::OK,
+            json!({
+              "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+              "token_endpoint": "https://oauth2.googleapis.com/token",
+              "userinfo_endpoint": "https://openidconnect.googleapis.com/v1/userinfo"
+            }),
+        )])
+        .await;
+        let app = start_app(live_config_with_oidc(
+            &kubernetes.base_url,
+            None,
+            oidc_config(&oidc.base_url, "http://localhost"),
+        ))
+        .await;
+        let client = client_without_redirects();
+
+        let response = client
+            .get(format!("{}/auth/login", app.base_url))
+            .send()
+            .await
+            .expect("login response should succeed");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("login redirect should include a location header");
+        assert!(location.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(location.contains("response_type=code"));
+        assert!(location.contains("client_id=client-id"));
+        assert!(location.contains("redirect_uri=http%3A%2F%2Flocalhost%2Fauth%2Fcallback"));
+        assert!(
+            response
+                .headers()
+                .get_all(reqwest::header::SET_COOKIE)
+                .iter()
+                .any(|value| value
+                    .to_str()
+                    .expect("set-cookie should be text")
+                    .contains("test-auth-flow="))
+        );
+
+        app.shutdown();
+        oidc.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auth_login_returns_bad_gateway_when_discovery_fetch_fails() {
+        let kubernetes = start_empty_kubernetes_server().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let unavailable_issuer = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let app = start_app(live_config_with_oidc(
+            &kubernetes.base_url,
+            None,
+            oidc_config(&unavailable_issuer, "http://localhost"),
+        ))
+        .await;
+        let client = client_without_redirects();
+
+        let response = client
+            .get(format!("{}/auth/login", app.base_url))
+            .send()
+            .await
+            .expect("login response should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(
+            payload["error"],
+            "OIDC discovery is unavailable; check server logs for details"
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
     async fn fixture_mode_serves_static_ui_and_metrics() {
         let app = start_app(fixture_config()).await;
         let client = Client::new();
@@ -485,7 +607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_mode_requires_trusted_auth_headers_for_protected_routes() {
+    async fn live_mode_requires_session_for_protected_routes() {
         let flink = start_mock_json_server(vec![(
             "/jobs/overview".to_owned(),
             StatusCode::OK,
@@ -508,7 +630,7 @@ mod tests {
         let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
         let client = Client::new();
 
-        for path in ["/api/jobs", "/api/clusters", "/metrics"] {
+        for path in ["/api/jobs", "/api/clusters"] {
             let response = client
                 .get(format!("{}{}", app.base_url, path))
                 .send()
@@ -516,7 +638,7 @@ mod tests {
                 .expect("unauthorized response should succeed");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             let payload: Value = response.json().await.expect("payload should be JSON");
-            assert_eq!(payload, json!({"error":"Missing trusted auth header"}));
+            assert_eq!(payload, json!({"error":"Missing or expired session"}));
         }
 
         let detail_response = client
@@ -536,6 +658,131 @@ mod tests {
             .expect("healthz response should succeed");
         assert_eq!(healthz_response.status(), StatusCode::OK);
 
+        let metrics_response = client
+            .get(format!("{}/metrics", app.base_url))
+            .send()
+            .await
+            .expect("metrics response should succeed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+
+        app.shutdown();
+        kubernetes.shutdown();
+        flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_serves_shell_assets_without_auth_headers() {
+        let flink = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({"jobs":[]}),
+        )])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
+        let client = Client::new();
+
+        let page_response = client
+            .get(format!("{}/", app.base_url))
+            .send()
+            .await
+            .expect("page response should succeed");
+        assert_eq!(page_response.status(), StatusCode::OK);
+        let page_html = page_response.text().await.expect("page HTML should load");
+        assert!(page_html.contains("Jobs + Status Dashboard"));
+
+        let app_js_response = client
+            .get(format!("{}/app.js", app.base_url))
+            .send()
+            .await
+            .expect("app.js response should succeed");
+        assert_eq!(app_js_response.status(), StatusCode::OK);
+        let app_js = app_js_response.text().await.expect("app.js should load");
+        assert!(app_js.contains("loadJobs"));
+
+        let styles_response = client
+            .get(format!("{}/styles.css", app.base_url))
+            .send()
+            .await
+            .expect("styles.css response should succeed");
+        assert_eq!(styles_response.status(), StatusCode::OK);
+        let styles = styles_response
+            .text()
+            .await
+            .expect("styles.css should load");
+        assert!(styles.contains(".page-header"));
+
+        app.shutdown();
+        kubernetes.shutdown();
+        flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_unauthorized_api_routes_return_json_without_redirect_headers() {
+        let flink = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({"jobs":[]}),
+        )])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
+        let client = Client::new();
+
+        for path in [
+            "/api/jobs",
+            "/api/clusters",
+            "/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+        ] {
+            let response = client
+                .get(format!("{}{}", app.base_url, path))
+                .send()
+                .await
+                .expect("unauthorized response should succeed");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                response.headers().get(reqwest::header::LOCATION).is_none(),
+                "unauthorized API route should not redirect: {path}"
+            );
+            assert!(
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("application/json")),
+                "unauthorized API route should return JSON: {path}"
+            );
+
+            let body = response.text().await.expect("body should load");
+            assert!(body.contains("Missing or expired session"));
+            assert!(!body.contains("<html"));
+        }
+
         app.shutdown();
         kubernetes.shutdown();
         flink.shutdown();
@@ -543,6 +790,7 @@ mod tests {
 
     struct RunningServer {
         base_url: String,
+        session_cookie: Option<String>,
         task: JoinHandle<()>,
     }
 
@@ -554,6 +802,17 @@ mod tests {
 
     async fn start_app(config: AppConfig) -> RunningServer {
         let state = AppState::new(config);
+        let session = if state.config.fixture_mode {
+            None
+        } else {
+            Some(
+                state
+                    .auth
+                    .issue_test_session(&state.config)
+                    .await
+                    .expect("test session should be created"),
+            )
+        };
         let app = build_router(state);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -569,6 +828,7 @@ mod tests {
 
         RunningServer {
             base_url: format!("http://{}", address),
+            session_cookie: session.as_ref().map(|(cookie, _)| cookie.clone()),
             task,
         }
     }
@@ -607,8 +867,18 @@ mod tests {
 
         RunningServer {
             base_url: format!("http://{}", address),
+            session_cookie: None,
             task,
         }
+    }
+
+    async fn start_empty_kubernetes_server() -> RunningServer {
+        start_mock_json_server(vec![(
+            "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+            StatusCode::OK,
+            json!({"items":[]}),
+        )])
+        .await
     }
 
     fn fixture_config() -> AppConfig {
@@ -620,12 +890,26 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
-            trusted_auth_headers: vec![TRUSTED_AUTH_HEADER.to_owned()],
+            oidc_request_timeout_ms: 15_000,
+            oidc: None,
+            session: test_session_config(),
             clusters: Vec::new(),
         }
     }
 
     fn live_config(kubernetes_base_url: &str, flink_base_url: Option<&str>) -> AppConfig {
+        live_config_with_oidc(
+            kubernetes_base_url,
+            flink_base_url,
+            oidc_config("https://issuer.example.com", "http://localhost"),
+        )
+    }
+
+    fn live_config_with_oidc(
+        kubernetes_base_url: &str,
+        flink_base_url: Option<&str>,
+        oidc: OidcConfig,
+    ) -> AppConfig {
         AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
@@ -634,7 +918,9 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
-            trusted_auth_headers: vec![TRUSTED_AUTH_HEADER.to_owned()],
+            oidc_request_timeout_ms: 15_000,
+            oidc: Some(oidc),
+            session: test_session_config(),
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: kubernetes_base_url.to_owned(),
@@ -648,8 +934,45 @@ mod tests {
         }
     }
 
-    fn authorized(request: RequestBuilder) -> RequestBuilder {
-        request.header(TRUSTED_AUTH_HEADER, TRUSTED_AUTH_VALUE)
+    fn oidc_config(issuer_url: &str, external_base_url: &str) -> OidcConfig {
+        OidcConfig {
+            issuer_url: issuer_url.to_owned(),
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            external_base_url: external_base_url.to_owned(),
+            callback_path: "/auth/callback".to_owned(),
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
+        }
+    }
+
+    fn test_session_config() -> crate::config::SessionConfig {
+        crate::config::SessionConfig {
+            cookie_name: "test-session".to_owned(),
+            auth_flow_cookie_name: "test-auth-flow".to_owned(),
+            cookie_secret: "0123456789abcdef0123456789abcdef".to_owned(),
+            ttl_secs: 60,
+            auth_flow_ttl_secs: 60,
+            secure_cookie: false,
+        }
+    }
+
+    fn authorized(app: &RunningServer, request: RequestBuilder) -> RequestBuilder {
+        if let Some(cookie) = &app.session_cookie {
+            request.header(reqwest::header::COOKIE, cookie)
+        } else {
+            request
+        }
+    }
+
+    fn client_without_redirects() -> Client {
+        Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .expect("client should build")
     }
 
     fn load_fixture_jobs() -> Vec<Value> {

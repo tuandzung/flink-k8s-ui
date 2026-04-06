@@ -1,3 +1,4 @@
+use crate::auth::AuthService;
 use crate::config::AppConfig;
 use crate::http::metrics::MetricsState;
 use crate::service::jobs_service::JobsService;
@@ -7,6 +8,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub jobs_service: JobsService,
     pub metrics: MetricsState,
+    pub auth: AuthService,
 }
 
 impl AppState {
@@ -14,6 +16,7 @@ impl AppState {
         Self {
             jobs_service: JobsService::new(config.clone()),
             metrics: MetricsState::new(),
+            auth: AuthService::new(config.oidc_request_timeout_ms),
             config,
         }
     }
