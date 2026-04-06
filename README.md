@@ -387,6 +387,7 @@ The included deployment assumes:
 - the application owns browser-facing OIDC login/session auth in production; ingress should only forward traffic and preserve the canonical HTTPS host
 - `deploy/api/deployment.yaml` is a **local port-forward example** until you replace `OIDC_EXTERNAL_BASE_URL=http://localhost:3000` and `SESSION_SECURE_COOKIE=false` with the real HTTPS ingress settings
 - `/metrics` should not be publicly exposed without protection
+- same-domain JobManager UI proxying depends on the app pod being able to reach the in-cluster `status.jobManagerUrl`; the v1 proxy stays read-only and does not support websocket/upgrade flows
 
 ## CI
 
@@ -406,6 +407,7 @@ Current CI behavior:
 - read-only dashboard only; no suspend/cancel/savepoint actions
 - local dev defaults to fixture mode rather than a live cluster
 - Flink REST enrichment is best-effort and should never block job listing
+- JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in v1
 - `FlinkSessionJob` collection is also best-effort
 - production access control depends on correct ingress/reverse-proxy configuration
 
