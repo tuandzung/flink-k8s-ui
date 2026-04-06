@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
+use tracing::error;
 use url::Url;
 
 use crate::config::{AppConfig, OidcConfig, SessionConfig};
@@ -81,6 +83,11 @@ struct ProviderMetadata {
     authorization_endpoint: String,
     token_endpoint: String,
     userinfo_endpoint: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct OidcDiscoveryError {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,17 +365,43 @@ impl AuthService {
         );
         let response = self
             .client
-            .get(discovery_url)
+            .get(&discovery_url)
             .send()
             .await
-            .context("failed to fetch OIDC discovery document")?;
-        let response = response
-            .error_for_status()
-            .context("OIDC discovery request failed")?;
-        let metadata = response
-            .json::<ProviderMetadata>()
-            .await
-            .context("failed to decode OIDC discovery document")?;
+            .map_err(|error| {
+                error!(
+                    issuer_url = %oidc.issuer_url,
+                    %discovery_url,
+                    error = %error,
+                    "oidc_discovery_fetch_failed"
+                );
+                OidcDiscoveryError::new(format!(
+                    "failed to fetch OIDC discovery document from {discovery_url}: {error}"
+                ))
+            })?;
+        let response = response.error_for_status().map_err(|error| {
+            error!(
+                issuer_url = %oidc.issuer_url,
+                %discovery_url,
+                http_status = error.status().map(|status| status.as_u16()),
+                error = %error,
+                "oidc_discovery_request_failed"
+            );
+            OidcDiscoveryError::new(format!(
+                "OIDC discovery request failed for {discovery_url}: {error}"
+            ))
+        })?;
+        let metadata = response.json::<ProviderMetadata>().await.map_err(|error| {
+            error!(
+                issuer_url = %oidc.issuer_url,
+                %discovery_url,
+                error = %error,
+                "oidc_discovery_decode_failed"
+            );
+            OidcDiscoveryError::new(format!(
+                "failed to decode OIDC discovery document from {discovery_url}: {error}"
+            ))
+        })?;
 
         *self.provider_metadata.write().await = Some(metadata.clone());
         Ok(metadata)
@@ -391,6 +424,20 @@ impl AuthService {
             .retain(|_, pending| pending.expires_at > now);
     }
 }
+
+impl OidcDiscoveryError {
+    fn new(message: String) -> anyhow::Error {
+        Self { message }.into()
+    }
+}
+
+impl fmt::Display for OidcDiscoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for OidcDiscoveryError {}
 
 pub fn fixture_session_snapshot() -> SessionSnapshot {
     SessionSnapshot {

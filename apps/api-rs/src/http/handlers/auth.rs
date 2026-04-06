@@ -3,8 +3,11 @@ use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
-use crate::auth::{AuthCallbackQuery, LogoutError, fixture_session_snapshot, read_cookie};
+use crate::auth::{
+    AuthCallbackQuery, LogoutError, OidcDiscoveryError, fixture_session_snapshot, read_cookie,
+};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -95,7 +98,7 @@ pub async fn login(
         .auth
         .start_login(&state.config)
         .await
-        .map_err(internal_server_error)?;
+        .map_err(login_error)?;
     let mut response = Redirect::to(&login.authorization_url).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -189,4 +192,38 @@ fn header_error(
     error: axum::http::header::InvalidHeaderValue,
 ) -> (StatusCode, Json<ErrorResponse>) {
     internal_server_error(anyhow::anyhow!(error.to_string()))
+}
+
+fn login_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
+    let error_chain = format_error_chain(&error);
+    error!(
+        error = %error,
+        error_chain = %error_chain,
+        "oidc_login_start_failed"
+    );
+
+    if is_oidc_discovery_error(&error) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "OIDC discovery is unavailable; check server logs for details".to_owned(),
+            }),
+        );
+    }
+
+    internal_server_error(error)
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+fn is_oidc_discovery_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<OidcDiscoveryError>().is_some())
 }

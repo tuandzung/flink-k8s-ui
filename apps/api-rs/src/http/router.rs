@@ -149,13 +149,13 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::{Json, Router};
-    use reqwest::{Client, RequestBuilder};
+    use reqwest::{Client, RequestBuilder, redirect::Policy};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
     use super::build_router;
-    use crate::config::{AppConfig, ClusterConfig};
+    use crate::config::{AppConfig, ClusterConfig, OidcConfig};
     use crate::state::AppState;
 
     #[tokio::test]
@@ -459,6 +459,90 @@ mod tests {
         );
 
         app.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auth_login_redirects_after_successful_discovery() {
+        let kubernetes = start_empty_kubernetes_server().await;
+        let oidc = start_mock_json_server(vec![(
+            "/.well-known/openid-configuration".to_owned(),
+            StatusCode::OK,
+            json!({
+              "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+              "token_endpoint": "https://oauth2.googleapis.com/token",
+              "userinfo_endpoint": "https://openidconnect.googleapis.com/v1/userinfo"
+            }),
+        )])
+        .await;
+        let app = start_app(live_config_with_oidc(
+            &kubernetes.base_url,
+            None,
+            oidc_config(&oidc.base_url, "http://localhost"),
+        ))
+        .await;
+        let client = client_without_redirects();
+
+        let response = client
+            .get(format!("{}/auth/login", app.base_url))
+            .send()
+            .await
+            .expect("login response should succeed");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("login redirect should include a location header");
+        assert!(location.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(location.contains("response_type=code"));
+        assert!(location.contains("client_id=client-id"));
+        assert!(location.contains("redirect_uri=http%3A%2F%2Flocalhost%2Fauth%2Fcallback"));
+        assert!(
+            response
+                .headers()
+                .get_all(reqwest::header::SET_COOKIE)
+                .iter()
+                .any(|value| value
+                    .to_str()
+                    .expect("set-cookie should be text")
+                    .contains("test-auth-flow="))
+        );
+
+        app.shutdown();
+        oidc.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auth_login_returns_bad_gateway_when_discovery_fetch_fails() {
+        let kubernetes = start_empty_kubernetes_server().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let unavailable_issuer = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let app = start_app(live_config_with_oidc(
+            &kubernetes.base_url,
+            None,
+            oidc_config(&unavailable_issuer, "http://localhost"),
+        ))
+        .await;
+        let client = client_without_redirects();
+
+        let response = client
+            .get(format!("{}/auth/login", app.base_url))
+            .send()
+            .await
+            .expect("login response should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(
+            payload["error"],
+            "OIDC discovery is unavailable; check server logs for details"
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
     }
 
     #[tokio::test]
@@ -788,6 +872,15 @@ mod tests {
         }
     }
 
+    async fn start_empty_kubernetes_server() -> RunningServer {
+        start_mock_json_server(vec![(
+            "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+            StatusCode::OK,
+            json!({"items":[]}),
+        )])
+        .await
+    }
+
     fn fixture_config() -> AppConfig {
         AppConfig {
             host: "127.0.0.1".to_owned(),
@@ -797,6 +890,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: test_session_config(),
             clusters: Vec::new(),
@@ -804,6 +898,18 @@ mod tests {
     }
 
     fn live_config(kubernetes_base_url: &str, flink_base_url: Option<&str>) -> AppConfig {
+        live_config_with_oidc(
+            kubernetes_base_url,
+            flink_base_url,
+            oidc_config("https://issuer.example.com", "http://localhost"),
+        )
+    }
+
+    fn live_config_with_oidc(
+        kubernetes_base_url: &str,
+        flink_base_url: Option<&str>,
+        oidc: OidcConfig,
+    ) -> AppConfig {
         AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
@@ -812,18 +918,8 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
-            oidc: Some(crate::config::OidcConfig {
-                issuer_url: "https://issuer.example.com".to_owned(),
-                client_id: "client-id".to_owned(),
-                client_secret: "client-secret".to_owned(),
-                external_base_url: "http://localhost".to_owned(),
-                callback_path: "/auth/callback".to_owned(),
-                scopes: vec![
-                    "openid".to_owned(),
-                    "profile".to_owned(),
-                    "email".to_owned(),
-                ],
-            }),
+            oidc_request_timeout_ms: 15_000,
+            oidc: Some(oidc),
             session: test_session_config(),
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
@@ -835,6 +931,21 @@ mod tests {
                 flink_api_version: "v1beta1".to_owned(),
                 flink_rest_base_url: flink_base_url.map(ToOwned::to_owned),
             }],
+        }
+    }
+
+    fn oidc_config(issuer_url: &str, external_base_url: &str) -> OidcConfig {
+        OidcConfig {
+            issuer_url: issuer_url.to_owned(),
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            external_base_url: external_base_url.to_owned(),
+            callback_path: "/auth/callback".to_owned(),
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
         }
     }
 
@@ -855,6 +966,13 @@ mod tests {
         } else {
             request
         }
+    }
+
+    fn client_without_redirects() -> Client {
+        Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .expect("client should build")
     }
 
     fn load_fixture_jobs() -> Vec<Value> {

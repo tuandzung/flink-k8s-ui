@@ -42,11 +42,15 @@ spec:
                   name: flink-job-ui-oidc
                   key: client-secret
             - name: OIDC_EXTERNAL_BASE_URL
-              value: "https://flink-jobs.example.com"
+              # Local-only port-forward callback target. Replace with the canonical
+              # public HTTPS URL before using this manifest behind a real ingress.
+              value: "http://localhost:3000"
             - name: OIDC_CALLBACK_PATH
               value: "/auth/callback"
             - name: OIDC_SCOPES
               value: "openid profile email"
+            - name: OIDC_REQUEST_TIMEOUT_MS
+              value: "15000"
             - name: SESSION_COOKIE_SECRET
               valueFrom:
                 secretKeyRef:
@@ -55,7 +59,9 @@ spec:
             - name: SESSION_TTL_SECS
               value: "28800"
             - name: SESSION_SECURE_COOKIE
-              value: "true"
+              # Keep false only for local kubectl port-forward HTTP testing. Real
+              # HTTPS ingress should use SESSION_SECURE_COOKIE=true.
+              value: "false"
             - name: TRUST_PROXY_HEADERS
               value: "true"
             - name: WATCH_NAMESPACES

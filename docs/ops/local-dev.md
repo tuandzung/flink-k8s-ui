@@ -72,6 +72,7 @@ export OIDC_CLIENT_SECRET='replace-me'
 export OIDC_EXTERNAL_BASE_URL='https://flink-jobs.example.com'
 export OIDC_CALLBACK_PATH='/auth/callback'
 export OIDC_SCOPES='openid profile email'
+export OIDC_REQUEST_TIMEOUT_MS='15000'
 export SESSION_COOKIE_SECRET='replace-with-32-byte-secret'
 export SESSION_SECURE_COOKIE=true
 export FLINK_UI_CLUSTERS_JSON='[
@@ -90,6 +91,10 @@ npm start
 If you test the live OIDC flow through `kubectl port-forward` on `http://localhost:3000`,
 set `SESSION_SECURE_COOKIE=false` for that local HTTP session. Keep it `true` for real
 HTTPS ingress traffic.
+
+If your cluster has slow outbound DNS/TLS handshakes to Google, raise
+`OIDC_REQUEST_TIMEOUT_MS` before increasing the broader `REQUEST_TIMEOUT_MS` used for
+Kubernetes/Flink upstream calls.
 
 ## Notes
 

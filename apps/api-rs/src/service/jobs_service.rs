@@ -124,6 +124,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: crate::config::SessionConfig {
                 cookie_name: "session".to_owned(),

@@ -10,6 +10,7 @@ const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceacc
 const DEFAULT_CALLBACK_PATH: &str = "/auth/callback";
 const DEFAULT_SESSION_COOKIE_NAME: &str = "flink_job_ui_session";
 const DEFAULT_AUTH_FLOW_COOKIE_NAME: &str = "flink_job_ui_auth_flow";
+const DEFAULT_OIDC_REQUEST_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -20,6 +21,7 @@ pub struct AppConfig {
     pub fixture_file: PathBuf,
     pub cache_ttl_ms: u64,
     pub request_timeout_ms: u64,
+    pub oidc_request_timeout_ms: u64,
     pub oidc: Option<OidcConfig>,
     pub session: SessionConfig,
     pub clusters: Vec<ClusterConfig>,
@@ -72,6 +74,10 @@ impl AppConfig {
         let fixture_mode = parse_bool(env::var("FIXTURE_MODE").ok().as_deref(), false);
         let fixture_file = root_dir
             .join(env::var("FIXTURE_FILE").unwrap_or_else(|_| "fixtures/jobs.json".to_owned()));
+        let request_timeout_ms = env::var("REQUEST_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4_000);
         let oidc = OidcConfig::from_env()?;
         let session = SessionConfig::from_env();
 
@@ -88,10 +94,11 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(5_000),
-            request_timeout_ms: env::var("REQUEST_TIMEOUT_MS")
+            request_timeout_ms,
+            oidc_request_timeout_ms: env::var("OIDC_REQUEST_TIMEOUT_MS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(4_000),
+                .unwrap_or(default_oidc_request_timeout_ms(request_timeout_ms)),
             oidc,
             session,
             clusters,
@@ -257,6 +264,10 @@ fn parse_scopes(value: Option<String>) -> Vec<String> {
     }
 }
 
+fn default_oidc_request_timeout_ms(request_timeout_ms: u64) -> u64 {
+    request_timeout_ms.max(DEFAULT_OIDC_REQUEST_TIMEOUT_MS)
+}
+
 fn normalize_base_url(value: &str) -> Result<String> {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -383,8 +394,8 @@ fn looks_like_repo_root(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, ClusterConfig, OidcConfig, SessionConfig, normalize_base_url,
-        normalize_callback_path, parse_scopes,
+        AppConfig, ClusterConfig, OidcConfig, SessionConfig, default_oidc_request_timeout_ms,
+        normalize_base_url, normalize_callback_path, parse_scopes,
     };
     use std::path::PathBuf;
 
@@ -435,6 +446,12 @@ mod tests {
     }
 
     #[test]
+    fn oidc_timeout_default_is_more_forgiving_than_general_request_timeout() {
+        assert_eq!(default_oidc_request_timeout_ms(1_000), 15_000);
+        assert_eq!(default_oidc_request_timeout_ms(20_000), 20_000);
+    }
+
+    #[test]
     fn live_config_requires_clusters_and_oidc() {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
@@ -444,6 +461,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
             clusters: Vec::new(),
@@ -463,6 +481,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
             clusters: Vec::new(),
@@ -481,6 +500,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: Some(OidcConfig {
                 issuer_url: "https://issuer.example.com".to_owned(),
                 client_id: "client-id".to_owned(),
@@ -518,6 +538,7 @@ mod tests {
             fixture_file: workspace_root().join("fixtures/jobs.json"),
             cache_ttl_ms: 0,
             request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
             oidc: Some(OidcConfig {
                 issuer_url: "https://issuer.example.com".to_owned(),
                 client_id: "client-id".to_owned(),

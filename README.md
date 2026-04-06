@@ -127,6 +127,7 @@ export OIDC_CLIENT_SECRET='replace-me'
 export OIDC_EXTERNAL_BASE_URL='https://flink-jobs.example.com'
 export OIDC_CALLBACK_PATH='/auth/callback'
 export OIDC_SCOPES='openid profile email'
+export OIDC_REQUEST_TIMEOUT_MS='15000'
 export SESSION_COOKIE_SECRET='replace-with-32-byte-secret'
 export SESSION_SECURE_COOKIE=true
 export FLINK_UI_CLUSTERS_JSON='[
@@ -245,6 +246,7 @@ The app expects **application-owned OIDC/session auth** in production.
 - `/api/session` lets the static UI determine whether to render the signed-out shell, loading state, or authenticated dashboard boot
 - `/api/*` is protected by the app-owned same-origin session instead of ingress-injected auth headers
 - the deployment must set a canonical external base URL so login redirects and callback handling stay correct behind the public host
+- OIDC discovery/token/userinfo calls use a dedicated auth timeout so slow identity-provider handshakes do not inherit the tighter Kubernetes/Flink upstream timeout budget
 - fixture mode bypasses OIDC only for explicit local-development runs
 
 ### Important deployment note
@@ -272,6 +274,7 @@ Do **not** expose `/metrics` on the public ingress. Keep it:
 | `OIDC_EXTERNAL_BASE_URL` | canonical external app URL used for redirects/callbacks     | none                              |
 | `OIDC_CALLBACK_PATH`     | callback route mounted by the app                           | `/auth/callback`                  |
 | `OIDC_SCOPES`            | space-delimited OIDC scopes                                 | `openid profile email`            |
+| `OIDC_REQUEST_TIMEOUT_MS` | timeout for OIDC discovery/token/userinfo HTTP calls       | `max(REQUEST_TIMEOUT_MS, 15000)`  |
 | `SESSION_COOKIE_SECRET`  | secret used to sign/encrypt the app session cookie          | none                              |
 | `SESSION_TTL_SECS`       | app session lifetime                                        | `28800`                           |
 | `SESSION_SECURE_COOKIE`  | mark the session cookie as HTTPS-only                       | `true` in production              |
@@ -381,7 +384,8 @@ The included deployment assumes:
 
 - Rust is the only supported production runtime
 - the app listens on port `3000`
-- ingress or reverse proxy authenticates public traffic
+- the application owns browser-facing OIDC login/session auth in production; ingress should only forward traffic and preserve the canonical HTTPS host
+- `deploy/api/deployment.yaml` is a **local port-forward example** until you replace `OIDC_EXTERNAL_BASE_URL=http://localhost:3000` and `SESSION_SECURE_COOKIE=false` with the real HTTPS ingress settings
 - `/metrics` should not be publicly exposed without protection
 
 ## CI

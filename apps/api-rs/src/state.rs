@@ -16,7 +16,7 @@ impl AppState {
         Self {
             jobs_service: JobsService::new(config.clone()),
             metrics: MetricsState::new(),
-            auth: AuthService::new(config.request_timeout_ms),
+            auth: AuthService::new(config.oidc_request_timeout_ms),
             config,
         }
     }
