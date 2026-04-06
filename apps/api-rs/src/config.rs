@@ -114,6 +114,11 @@ impl AppConfig {
             if oidc.scopes.is_empty() {
                 bail!("OIDC scopes must include at least openid")
             }
+            if self.session.secure_cookie && oidc.external_base_url.starts_with("http://") {
+                bail!(
+                    "SESSION_SECURE_COOKIE=true requires an https OIDC_EXTERNAL_BASE_URL; disable secure cookies only for local HTTP testing"
+                )
+            }
             if self.session.cookie_secret.len() < 32 {
                 bail!("SESSION_COOKIE_SECRET must be at least 32 characters long")
             }
@@ -498,5 +503,45 @@ mod tests {
         };
 
         config.validate().expect("live mode should validate");
+    }
+
+    #[test]
+    fn live_config_rejects_secure_cookie_on_http_external_base_url() {
+        let mut session = session_config();
+        session.secure_cookie = true;
+
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc: Some(OidcConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "client-id".to_owned(),
+                client_secret: "client-secret".to_owned(),
+                external_base_url: "http://localhost:3000".to_owned(),
+                callback_path: "/auth/callback".to_owned(),
+                scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            }),
+            session,
+            clusters: vec![ClusterConfig {
+                name: "demo".to_owned(),
+                api_url: "https://kubernetes.example.com".to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: false,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                flink_rest_base_url: None,
+            }],
+        };
+
+        let error = config
+            .validate()
+            .expect_err("http external base URL should reject secure cookies");
+        assert!(error.to_string().contains("SESSION_SECURE_COOKIE=true"));
     }
 }

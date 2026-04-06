@@ -87,6 +87,10 @@ export FLINK_UI_CLUSTERS_JSON='[
 npm start
 ```
 
+If you test the live OIDC flow through `kubectl port-forward` on `http://localhost:3000`,
+set `SESSION_SECURE_COOKIE=false` for that local HTTP session. Keep it `true` for real
+HTTPS ingress traffic.
+
 ## Notes
 
 - The default `npm start` / `npm run dev` path now runs the Rust backend in `apps/api-rs`.
