@@ -66,6 +66,10 @@ spec:
               value: "true"
             - name: WATCH_NAMESPACES
               value: "analytics,payments"
+          # When running in-cluster with the default K8S_* / service-account discovery
+          # path, the app can synthesize a FlinkDeployment JobManager URL as
+          # http://<deployment-name>-rest.<namespace>.svc:8081/ if the operator status
+          # omits jobManagerUrl. Explicit status URLs still take precedence.
           ports:
             - name: http
               containerPort: 3000

@@ -34,7 +34,7 @@ The repo was greenfield, so the implementation optimizes for:
 
 1. UI calls `GET /api/jobs`
 2. backend loads fixture data or reads operator CRs from Kubernetes
-3. backend normalizes resource status into canonical UI states
+3. backend normalizes resource status into canonical UI states and may synthesize an in-cluster `FlinkDeployment` JobManager URL (`http://<name>-rest.<namespace>.svc:8081/`) when operator status omits one
 4. backend optionally enriches results from Flink REST
 5. UI renders summary cards, filters, table, and details drawer
 
@@ -53,6 +53,7 @@ Raw status is still preserved in the details view for troubleshooting.
 - `FIXTURE_MODE=true` uses `fixtures/jobs.json`
 - `FLINK_UI_CLUSTERS_JSON` supports explicit cluster config
 - `K8S_*` env vars support a single-cluster deployment
+- the in-cluster auto-derived cluster path also enables `FlinkDeployment` JobManager URL discovery via the `<name>-rest.<namespace>.svc:8081` service convention
 
 ## Protection model
 

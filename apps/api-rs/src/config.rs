@@ -56,6 +56,7 @@ pub struct ClusterConfig {
     pub insecure_skip_tls_verify: bool,
     pub namespaces: Vec<String>,
     pub flink_api_version: String,
+    pub derive_jobmanager_url_in_cluster: bool,
     #[allow(dead_code)]
     pub flink_rest_base_url: Option<String>,
 }
@@ -318,6 +319,7 @@ fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<Cluste
                 flink_api_version: cluster
                     .flink_api_version
                     .unwrap_or_else(|| "v1beta1".to_owned()),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: cluster.flink_rest_base_url,
             })
         })
@@ -362,6 +364,7 @@ fn default_cluster_from_env() -> Result<Vec<ClusterConfig>> {
             .collect(),
         flink_api_version: env::var("FLINK_K8S_API_VERSION")
             .unwrap_or_else(|_| "v1beta1".to_owned()),
+        derive_jobmanager_url_in_cluster: true,
         flink_rest_base_url: env::var("FLINK_REST_BASE_URL").ok(),
     }])
 }
@@ -518,6 +521,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: None,
             }],
         };
@@ -556,6 +560,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: None,
             }],
         };

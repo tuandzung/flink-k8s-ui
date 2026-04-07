@@ -1196,6 +1196,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: flink_base_url.map(ToOwned::to_owned),
             }],
         }

@@ -131,6 +131,20 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
+    fn cluster(base_url: &str) -> ClusterConfig {
+        ClusterConfig {
+            name: "demo".to_owned(),
+            api_url: base_url.to_owned(),
+            bearer_token: "token".to_owned(),
+            ca_cert: None,
+            insecure_skip_tls_verify: false,
+            namespaces: vec!["analytics".to_owned()],
+            flink_api_version: "v1beta1".to_owned(),
+            derive_jobmanager_url_in_cluster: false,
+            flink_rest_base_url: None,
+        }
+    }
+
     #[tokio::test]
     async fn list_cluster_jobs_normalizes_deployments_from_mock_kubernetes() {
         let mock = start_mock_server(vec![(
@@ -162,16 +176,7 @@ mod tests {
             }),
         )])
         .await;
-        let cluster = ClusterConfig {
-            name: "demo".to_owned(),
-            api_url: mock.base_url.clone(),
-            bearer_token: "token".to_owned(),
-            ca_cert: None,
-            insecure_skip_tls_verify: false,
-            namespaces: vec!["analytics".to_owned()],
-            flink_api_version: "v1beta1".to_owned(),
-            flink_rest_base_url: None,
-        };
+        let cluster = cluster(&mock.base_url);
 
         let jobs = list_cluster_jobs(&cluster, 1_000)
             .await
@@ -209,16 +214,7 @@ mod tests {
             ),
         ])
         .await;
-        let cluster = ClusterConfig {
-            name: "demo".to_owned(),
-            api_url: mock.base_url.clone(),
-            bearer_token: "token".to_owned(),
-            ca_cert: None,
-            insecure_skip_tls_verify: false,
-            namespaces: vec!["analytics".to_owned()],
-            flink_api_version: "v1beta1".to_owned(),
-            flink_rest_base_url: None,
-        };
+        let cluster = cluster(&mock.base_url);
 
         let jobs = list_cluster_jobs(&cluster, 1_000)
             .await
@@ -226,6 +222,43 @@ mod tests {
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].kind, "FlinkDeployment");
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn list_cluster_jobs_derives_in_cluster_jobmanager_url_when_missing() {
+        let mock = start_mock_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let mut cluster = cluster(&mock.base_url);
+        cluster.derive_jobmanager_url_in_cluster = true;
+
+        let jobs = list_cluster_jobs(&cluster, 1_000)
+            .await
+            .expect("jobs should load");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].native_ui_url.as_deref(),
+            Some("http://orders-stream-rest.analytics.svc:8081/")
+        );
 
         mock.shutdown();
     }
