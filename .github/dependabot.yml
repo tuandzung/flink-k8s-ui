@@ -10,7 +10,7 @@ updates:
     target-branch: main
     open-pull-requests-limit: 5
     commit-message:
-      prefix: chore(deps)
+      prefix: chore
       include: scope
 
   - package-ecosystem: github-actions
@@ -23,7 +23,7 @@ updates:
     target-branch: main
     open-pull-requests-limit: 5
     commit-message:
-      prefix: chore(deps)
+      prefix: chore
       include: scope
 
   - package-ecosystem: docker
@@ -36,5 +36,5 @@ updates:
     target-branch: main
     open-pull-requests-limit: 5
     commit-message:
-      prefix: chore(deps)
+      prefix: chore
       include: scope
