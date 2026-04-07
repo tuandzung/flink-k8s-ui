@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub oidc_request_timeout_ms: u64,
     pub oidc: Option<OidcConfig>,
     pub session: SessionConfig,
+    pub allow_loopback_jobmanager_targets: bool,
     pub clusters: Vec<ClusterConfig>,
 }
 
@@ -102,6 +103,7 @@ impl AppConfig {
                 .unwrap_or(default_oidc_request_timeout_ms(request_timeout_ms)),
             oidc,
             session,
+            allow_loopback_jobmanager_targets: false,
             clusters,
         };
 
@@ -467,6 +469,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: Vec::new(),
         };
 
@@ -487,6 +490,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: Vec::new(),
         };
 
@@ -513,6 +517,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "profile".to_owned()],
             }),
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: "https://kubernetes.example.com".to_owned(),
@@ -552,6 +557,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "profile".to_owned()],
             }),
             session,
+            allow_loopback_jobmanager_targets: false,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: "https://kubernetes.example.com".to_owned(),

@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{OriginalUri, Path, State};
-use axum::http::header::{self, HeaderMap, HeaderValue};
+use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use reqwest::redirect::Policy;
@@ -16,6 +16,16 @@ use crate::domain::job::Job;
 use crate::state::AppState;
 
 const ROOT_SENTINEL: &str = "@root";
+const HOP_BY_HOP_RESPONSE_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 #[derive(Serialize)]
 struct ProxyErrorResponse {
@@ -73,16 +83,17 @@ async fn proxy_jobmanager_request(
         }
     };
 
-    let upstream_base = match parse_jobmanager_url(&job, cfg!(test)) {
-        Ok(url) => url,
-        Err(details) => {
-            return proxy_error(
-                StatusCode::BAD_GATEWAY,
-                "JobManager URL unavailable",
-                &details,
-            );
-        }
-    };
+    let upstream_base =
+        match parse_jobmanager_url(&job, state.config.allow_loopback_jobmanager_targets) {
+            Ok(url) => url,
+            Err(details) => {
+                return proxy_error(
+                    StatusCode::BAD_GATEWAY,
+                    "JobManager URL unavailable",
+                    &details,
+                );
+            }
+        };
 
     let upstream_url =
         match build_upstream_url(&upstream_base, path.as_deref(), original_uri.0.query()) {
@@ -235,18 +246,7 @@ fn copy_response_headers(
     content_type: Option<&str>,
 ) {
     for (name, value) in upstream_headers {
-        if name == header::CONTENT_LENGTH
-            || name == header::LOCATION
-            || name == header::SET_COOKIE
-            || name == header::CONNECTION
-            || name.as_str().eq_ignore_ascii_case("keep-alive")
-            || name.as_str().eq_ignore_ascii_case("proxy-authenticate")
-            || name.as_str().eq_ignore_ascii_case("proxy-authorization")
-            || name.as_str().eq_ignore_ascii_case("te")
-            || name.as_str().eq_ignore_ascii_case("trailers")
-            || name.as_str().eq_ignore_ascii_case("transfer-encoding")
-            || name.as_str().eq_ignore_ascii_case("upgrade")
-        {
+        if should_strip_upstream_response_header(name) {
             continue;
         }
 
@@ -264,6 +264,15 @@ fn copy_response_headers(
                 .insert(header::CONTENT_TYPE, content_type);
         }
     }
+}
+
+fn should_strip_upstream_response_header(name: &HeaderName) -> bool {
+    name == header::CONTENT_LENGTH
+        || name == header::LOCATION
+        || name == header::SET_COOKIE
+        || HOP_BY_HOP_RESPONSE_HEADERS
+            .iter()
+            .any(|candidate| name.as_str().eq_ignore_ascii_case(candidate))
 }
 
 fn maybe_rewrite_body<'a>(
@@ -446,8 +455,10 @@ fn proxy_error(status: StatusCode, error: &str, details: &str) -> Response {
 mod tests {
     use super::{
         ROOT_SENTINEL, build_upstream_url, maybe_rewrite_body, normalize_jobmanager_url,
-        proxy_prefix, rewrite_location, validate_jobmanager_url,
+        proxy_prefix, rewrite_location, should_strip_upstream_response_header,
+        validate_jobmanager_url,
     };
+    use axum::http::HeaderName;
     use reqwest::Url;
 
     #[test]
@@ -499,5 +510,18 @@ mod tests {
         assert!(rewritten.contains(&format!(r#"href="{proxy}/{ROOT_SENTINEL}/assets/app.css""#)));
         assert!(rewritten.contains(&format!(r#"src="{proxy}/{ROOT_SENTINEL}/assets/logo.svg""#)));
         assert!(rewritten.contains(&format!(r#"url({proxy}/{ROOT_SENTINEL}/bg.png)"#)));
+    }
+
+    #[test]
+    fn should_strip_upstream_response_header_strips_trailer_and_hop_by_hop_headers() {
+        assert!(should_strip_upstream_response_header(
+            &HeaderName::from_static("trailer")
+        ));
+        assert!(should_strip_upstream_response_header(
+            &HeaderName::from_static("transfer-encoding")
+        ));
+        assert!(!should_strip_upstream_response_header(
+            &HeaderName::from_static("cache-control")
+        ));
     }
 }

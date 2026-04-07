@@ -1160,6 +1160,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: test_session_config(),
+            allow_loopback_jobmanager_targets: true,
             clusters: Vec::new(),
         }
     }
@@ -1188,6 +1189,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: Some(oidc),
             session: test_session_config(),
+            allow_loopback_jobmanager_targets: true,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: kubernetes_base_url.to_owned(),
