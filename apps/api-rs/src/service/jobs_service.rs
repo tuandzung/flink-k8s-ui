@@ -134,6 +134,7 @@ mod tests {
                 auth_flow_ttl_secs: 60,
                 secure_cookie: false,
             },
+            allow_loopback_jobmanager_targets: false,
             clusters: Vec::new(),
         }
     }

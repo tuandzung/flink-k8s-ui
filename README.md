@@ -314,6 +314,8 @@ If `FLINK_UI_CLUSTERS_JSON` is not set, the app can derive a cluster from enviro
 | `FLINK_K8S_API_VERSION`        | Flink operator API version          |
 | `FLINK_REST_BASE_URL`          | trusted Flink REST base URL         |
 
+When the app derives its cluster config from the in-cluster `K8S_*` / service-account path, it also auto-derives a `FlinkDeployment` JobManager UI base URL as `http://<metadata.name>-rest.<metadata.namespace>.svc:8081/` if the operator status omits `status.jobManagerUrl`. Explicit status URLs still win, and `FlinkSessionJob` remains best-effort.
+
 If `K8S_API_URL` is not set, the app can derive one from:
 
 - `KUBERNETES_SERVICE_HOST`
@@ -387,6 +389,8 @@ The included deployment assumes:
 - the application owns browser-facing OIDC login/session auth in production; ingress should only forward traffic and preserve the canonical HTTPS host
 - `deploy/api/deployment.yaml` is a **local port-forward example** until you replace `OIDC_EXTERNAL_BASE_URL=http://localhost:3000` and `SESSION_SECURE_COOKIE=false` with the real HTTPS ingress settings
 - `/metrics` should not be publicly exposed without protection
+- same-domain JobManager UI proxying depends on the app pod being able to reach the in-cluster JobManager REST service; when `status.jobManagerUrl` is missing, the app derives `FlinkDeployment` URLs as `http://<name>-rest.<namespace>.svc:8081/`
+- the v1 JobManager proxy stays read-only and does not support websocket/upgrade flows
 
 ## CI
 
@@ -406,6 +410,7 @@ Current CI behavior:
 - read-only dashboard only; no suspend/cancel/savepoint actions
 - local dev defaults to fixture mode rather than a live cluster
 - Flink REST enrichment is best-effort and should never block job listing
+- JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in v1
 - `FlinkSessionJob` collection is also best-effort
 - production access control depends on correct ingress/reverse-proxy configuration
 

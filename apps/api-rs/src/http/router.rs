@@ -9,6 +9,7 @@ use tower_http::services::ServeFile;
 
 use crate::http::handlers::auth::{callback, login, logout, session_status};
 use crate::http::handlers::health::{healthz, readyz};
+use crate::http::handlers::jobmanager_proxy::{proxy_jobmanager_path, proxy_jobmanager_root};
 use crate::http::handlers::jobs::{get_clusters, get_job_by_id, get_job_by_locator, list_jobs};
 use crate::state::AppState;
 
@@ -43,6 +44,18 @@ pub fn build_router(state: AppState) -> Router {
             get(get_job_by_locator),
         )
         .route("/api/jobs/{id}", get(get_job_by_id))
+        .route(
+            "/api/jobs/{id}/jobmanager-proxy",
+            get(proxy_jobmanager_root),
+        )
+        .route(
+            "/api/jobs/{id}/jobmanager-proxy/",
+            get(proxy_jobmanager_root),
+        )
+        .route(
+            "/api/jobs/{id}/jobmanager-proxy/{*path}",
+            get(proxy_jobmanager_path),
+        )
         .route_layer(from_fn_with_state(state.clone(), require_session_for_api));
 
     Router::new()
@@ -126,6 +139,9 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
         ("GET", Some("/api/clusters")) => "getClusters",
         ("GET", Some("/api/jobs/{id}"))
         | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => "getJob",
+        ("GET", Some("/api/jobs/{id}/jobmanager-proxy"))
+        | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/"))
+        | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/{*path}")) => "jobManagerProxy",
         ("GET", Some("/api/session")) => "sessionStatus",
         ("GET", Some("/auth/login")) => "authLogin",
         ("GET", Some("/auth/callback")) => "authCallback",
@@ -146,7 +162,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::extract::OriginalUri;
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use axum::{Json, Router};
     use reqwest::{Client, RequestBuilder, redirect::Policy};
@@ -630,7 +646,11 @@ mod tests {
         let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
         let client = Client::new();
 
-        for path in ["/api/jobs", "/api/clusters"] {
+        for path in [
+            "/api/jobs",
+            "/api/clusters",
+            "/api/jobs/demo:analytics:FlinkDeployment:orders-stream/jobmanager-proxy/",
+        ] {
             let response = client
                 .get(format!("{}{}", app.base_url, path))
                 .send()
@@ -757,6 +777,7 @@ mod tests {
             "/api/jobs",
             "/api/clusters",
             "/api/jobs/demo/analytics/FlinkDeployment/orders-stream",
+            "/api/jobs/demo:analytics:FlinkDeployment:orders-stream/jobmanager-proxy/",
         ] {
             let response = client
                 .get(format!("{}{}", app.base_url, path))
@@ -786,6 +807,204 @@ mod tests {
         app.shutdown();
         kubernetes.shutdown();
         flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_proxy_route_streams_html_assets_and_rewrites_redirects() {
+        let flink = start_mock_http_server(vec![
+            MockHttpResponse::html(
+                "/orders-stream/",
+                StatusCode::OK,
+                "<html><body><script src=\"assets/main.js\"></script></body></html>",
+            ),
+            MockHttpResponse::text(
+                "/orders-stream/assets/main.js",
+                StatusCode::OK,
+                "application/javascript",
+                "console.log('ok');",
+            ),
+            MockHttpResponse::redirect(
+                "/orders-stream/redirect",
+                StatusCode::FOUND,
+                "/orders-stream/assets/main.js",
+            )
+            .with_header(header::SET_COOKIE, "leaked=1; Path=/"),
+        ])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {
+                      "name": "orders-stream",
+                      "namespace": "analytics"
+                    },
+                    "status": {
+                      "jobManagerUrl": format!("{}/orders-stream/", flink.base_url),
+                      "jobStatus": {"state": "RUNNING"}
+                    }
+                  }]
+                }),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = client_without_redirects();
+        let proxy_root = format!(
+            "{}/api/jobs/demo:analytics:FlinkDeployment:orders-stream/jobmanager-proxy/",
+            app.base_url
+        );
+
+        let root_response = authorized(&app, client.get(&proxy_root))
+            .send()
+            .await
+            .expect("proxy root response should succeed");
+        assert_eq!(root_response.status(), StatusCode::OK);
+        assert!(root_response.headers().get(header::SET_COOKIE).is_none());
+        let root_body = root_response
+            .text()
+            .await
+            .expect("proxy root body should load");
+        assert!(root_body.contains("assets/main.js"));
+
+        let asset_response = authorized(&app, client.get(format!("{proxy_root}assets/main.js")))
+            .send()
+            .await
+            .expect("proxy asset response should succeed");
+        assert_eq!(asset_response.status(), StatusCode::OK);
+        assert_eq!(
+            asset_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/javascript")
+        );
+        let asset_body = asset_response
+            .text()
+            .await
+            .expect("proxy asset body should load");
+        assert!(asset_body.contains("console.log('ok');"));
+
+        let redirect_response = authorized(&app, client.get(format!("{proxy_root}redirect")))
+            .send()
+            .await
+            .expect("proxy redirect response should succeed");
+        assert_eq!(redirect_response.status(), StatusCode::FOUND);
+        assert_eq!(
+            redirect_response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "/api/jobs/demo%3Aanalytics%3AFlinkDeployment%3Aorders-stream/jobmanager-proxy/assets/main.js"
+            )
+        );
+        assert!(
+            redirect_response
+                .headers()
+                .get(header::SET_COOKIE)
+                .is_none()
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
+        flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_proxy_route_fails_clearly_when_jobmanager_url_is_missing() {
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {
+                      "name": "orders-stream",
+                      "namespace": "analytics"
+                    },
+                    "status": {
+                      "jobStatus": {"state": "RUNNING"}
+                    }
+                  }]
+                }),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.get(format!(
+                "{}/api/jobs/demo:analytics:FlinkDeployment:orders-stream/jobmanager-proxy/",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("proxy missing-url response should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "JobManager URL unavailable");
+        assert!(
+            payload["details"]
+                .as_str()
+                .is_some_and(|details| details.contains("does not expose"))
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_proxy_route_rejects_mutating_methods() {
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo:analytics:FlinkDeployment:orders-stream/jobmanager-proxy/",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("proxy method rejection response should succeed");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        app.shutdown();
+        kubernetes.shutdown();
     }
 
     struct RunningServer {
@@ -872,6 +1091,54 @@ mod tests {
         }
     }
 
+    async fn start_mock_http_server(responses: Vec<MockHttpResponse>) -> RunningServer {
+        let responses = Arc::new(
+            responses
+                .into_iter()
+                .map(|response| (response.path.clone(), response))
+                .collect::<BTreeMap<String, MockHttpResponse>>(),
+        );
+        let app = Router::new().fallback({
+            let responses = Arc::clone(&responses);
+            move |uri: OriginalUri| {
+                let responses = Arc::clone(&responses);
+                async move {
+                    match responses.get(uri.path()) {
+                        Some(response) => {
+                            let mut builder =
+                                axum::response::Response::builder().status(response.status);
+                            for (name, value) in &response.headers {
+                                builder = builder.header(name, value);
+                            }
+                            builder
+                                .body(axum::body::Body::from(response.body.clone()))
+                                .expect("mock response should build")
+                        }
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
+                    }
+                }
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
+        });
+
+        RunningServer {
+            base_url: format!("http://{}", address),
+            session_cookie: None,
+            task,
+        }
+    }
+
     async fn start_empty_kubernetes_server() -> RunningServer {
         start_mock_json_server(vec![(
             "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
@@ -893,6 +1160,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: test_session_config(),
+            allow_loopback_jobmanager_targets: true,
             clusters: Vec::new(),
         }
     }
@@ -921,6 +1189,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: Some(oidc),
             session: test_session_config(),
+            allow_loopback_jobmanager_targets: true,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: kubernetes_base_url.to_owned(),
@@ -929,6 +1198,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: flink_base_url.map(ToOwned::to_owned),
             }],
         }
@@ -973,6 +1243,47 @@ mod tests {
             .redirect(Policy::none())
             .build()
             .expect("client should build")
+    }
+
+    #[derive(Clone)]
+    struct MockHttpResponse {
+        path: String,
+        status: StatusCode,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl MockHttpResponse {
+        fn html(path: &str, status: StatusCode, body: &str) -> Self {
+            Self::text(path, status, "text/html; charset=utf-8", body)
+        }
+
+        fn text(path: &str, status: StatusCode, content_type: &str, body: &str) -> Self {
+            Self {
+                path: path.to_owned(),
+                status,
+                headers: vec![(
+                    header::CONTENT_TYPE.as_str().to_owned(),
+                    content_type.to_owned(),
+                )],
+                body: body.to_owned(),
+            }
+        }
+
+        fn redirect(path: &str, status: StatusCode, location: &str) -> Self {
+            Self {
+                path: path.to_owned(),
+                status,
+                headers: vec![(header::LOCATION.as_str().to_owned(), location.to_owned())],
+                body: String::new(),
+            }
+        }
+
+        fn with_header(mut self, name: header::HeaderName, value: &str) -> Self {
+            self.headers
+                .push((name.as_str().to_owned(), value.to_owned()));
+            self
+        }
     }
 
     fn load_fixture_jobs() -> Vec<Value> {

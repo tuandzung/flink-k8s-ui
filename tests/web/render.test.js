@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   filterJobs,
+  jobManagerProxyHref,
   renderAuthError,
   renderAuthLoading,
   renderDrawer,
@@ -40,10 +41,30 @@ test('renderTable shows empty state when there are no jobs', () => {
 test('renderDrawer includes warnings and sanitized status details', () => {
   const html = renderDrawer(fixture.jobs[3]);
   assert.match(html, /Restart backoff exceeded on JobManager/);
+  assert.match(
+    html,
+    /href="\/api\/jobs\/prod%3Arisk%3AFlinkDeployment%3Arisk-detector\/jobmanager-proxy\/"/
+  );
+  assert.match(html, /Open JobManager UI/);
   assert.match(html, /Status details/);
   assert.match(html, /&quot;statusSummary&quot;/);
   assert.doesNotMatch(html, /"metadata"/);
   assert.doesNotMatch(html, /"spec"/);
+});
+
+test('jobManagerProxyHref returns a same-domain proxy path for usable URLs only', () => {
+  assert.equal(
+    jobManagerProxyHref(fixture.jobs[0]),
+    '/api/jobs/demo%3Aanalytics%3AFlinkDeployment%3Aorders-stream/jobmanager-proxy/'
+  );
+  assert.equal(
+    jobManagerProxyHref({
+      id: 'demo:analytics:FlinkDeployment:bad-job',
+      nativeUiUrl: 'ftp://flink.example.com/orders-stream/'
+    }),
+    null
+  );
+  assert.equal(jobManagerProxyHref({ id: 'demo:analytics:FlinkDeployment:no-url' }), null);
 });
 
 test('renderWarnings highlights partial enrichment state', () => {

@@ -16,6 +16,9 @@ pub fn normalize_flink_resource(resource: Value, cluster: &ClusterConfig) -> Job
 }
 
 pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> Job {
+    let metadata_name = get_string(&resource, &["metadata", "name"]);
+    let namespace =
+        get_string(&resource, &["metadata", "namespace"]).unwrap_or_else(|| "default".to_owned());
     let job_name = first_defined(
         &resource,
         &[
@@ -43,7 +46,8 @@ pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> J
             &["status", "jobManagerUrl"],
             &["status", "jobManagerInfo", "url"],
         ],
-    );
+    )
+    .or_else(|| derive_jobmanager_url(cluster, metadata_name.as_deref(), namespace.as_str(), true));
 
     normalize_base(
         resource,
@@ -56,6 +60,9 @@ pub fn normalize_flink_deployment(resource: Value, cluster: &ClusterConfig) -> J
 }
 
 pub fn normalize_flink_session_job(resource: Value, cluster: &ClusterConfig) -> Job {
+    let metadata_name = get_string(&resource, &["metadata", "name"]);
+    let namespace =
+        get_string(&resource, &["metadata", "namespace"]).unwrap_or_else(|| "default".to_owned());
     let job_name = first_defined(
         &resource,
         &[
@@ -74,7 +81,9 @@ pub fn normalize_flink_session_job(resource: Value, cluster: &ClusterConfig) -> 
             &["spec", "job", "state"],
         ],
     );
-    let native_ui_url = first_defined(&resource, &[&["status", "jobManagerUrl"]]);
+    let native_ui_url = first_defined(&resource, &[&["status", "jobManagerUrl"]]).or_else(|| {
+        derive_jobmanager_url(cluster, metadata_name.as_deref(), namespace.as_str(), false)
+    });
 
     normalize_base(
         resource,
@@ -258,6 +267,37 @@ fn unique(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
+fn derive_jobmanager_url(
+    cluster: &ClusterConfig,
+    resource_name: Option<&str>,
+    namespace: &str,
+    supports_service_convention: bool,
+) -> Option<String> {
+    if !cluster.derive_jobmanager_url_in_cluster || !supports_service_convention {
+        return None;
+    }
+
+    let resource_name = resource_name?;
+    if !is_dns_label(resource_name) || !is_dns_label(namespace) {
+        return None;
+    }
+
+    Some(format!(
+        "http://{}-rest.{}.svc:8081/",
+        resource_name, namespace
+    ))
+}
+
+fn is_dns_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
 fn collect_defined_strings(resource: &Value, paths: &[&[&str]]) -> Vec<String> {
     paths
         .iter()
@@ -325,8 +365,15 @@ mod tests {
             insecure_skip_tls_verify: false,
             namespaces: vec!["analytics".to_owned()],
             flink_api_version: "v1beta1".to_owned(),
+            derive_jobmanager_url_in_cluster: false,
             flink_rest_base_url: None,
         }
+    }
+
+    fn in_cluster() -> ClusterConfig {
+        let mut cluster = cluster();
+        cluster.derive_jobmanager_url_in_cluster = true;
+        cluster
     }
 
     #[test]
@@ -413,5 +460,85 @@ mod tests {
                 .and_then(|summary| summary.job_state.as_deref()),
             Some("SUSPENDED")
         );
+        assert!(normalized.native_ui_url.is_none());
+    }
+
+    #[test]
+    fn normalize_flink_deployment_preserves_explicit_jobmanager_url_over_derived_value() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "orders-stream",
+                "namespace": "analytics"
+            },
+            "status": {
+                "jobStatus": { "state": "RUNNING" },
+                "jobManagerUrl": "https://flink.example.com/orders-stream/"
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &in_cluster());
+
+        assert_eq!(
+            normalized.native_ui_url.as_deref(),
+            Some("https://flink.example.com/orders-stream/")
+        );
+    }
+
+    #[test]
+    fn normalize_flink_deployment_derives_in_cluster_jobmanager_url_when_missing() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "orders-stream",
+                "namespace": "analytics"
+            },
+            "status": {
+                "jobStatus": { "state": "RUNNING" }
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &in_cluster());
+
+        assert_eq!(
+            normalized.native_ui_url.as_deref(),
+            Some("http://orders-stream-rest.analytics.svc:8081/")
+        );
+    }
+
+    #[test]
+    fn normalize_flink_deployment_fails_closed_for_invalid_service_name() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "Orders Stream",
+                "namespace": "analytics"
+            },
+            "status": {
+                "jobStatus": { "state": "RUNNING" }
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &in_cluster());
+
+        assert!(normalized.native_ui_url.is_none());
+    }
+
+    #[test]
+    fn normalize_flink_session_job_does_not_auto_derive_jobmanager_url() {
+        let resource = json!({
+            "kind": "FlinkSessionJob",
+            "metadata": {
+                "name": "session-job",
+                "namespace": "analytics"
+            },
+            "status": {
+                "jobStatus": { "state": "RUNNING" }
+            }
+        });
+
+        let normalized = normalize_flink_session_job(resource, &in_cluster());
+
+        assert!(normalized.native_ui_url.is_none());
     }
 }

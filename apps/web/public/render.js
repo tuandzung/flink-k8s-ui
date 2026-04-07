@@ -143,12 +143,22 @@ export function renderTable(jobs) {
   `;
 }
 
+export function jobManagerProxyHref(job) {
+  if (!job?.id || !hasUsableJobManagerUrl(job.nativeUiUrl)) {
+    return null;
+  }
+
+  return `/api/jobs/${encodeURIComponent(job.id)}/jobmanager-proxy/`;
+}
+
 export function renderDrawer(job) {
   if (!job) {
     return `
       <p class="muted">Select a job to inspect deployment details and warnings.</p>
     `;
   }
+
+  const proxyHref = jobManagerProxyHref(job);
 
   return `
     <div>
@@ -162,9 +172,9 @@ export function renderDrawer(job) {
       <p><strong>Mode:</strong> ${job.deploymentMode || 'unknown'}</p>
       <p><strong>Last update:</strong> ${job.lastUpdatedAt || '—'}</p>
       ${
-        job.nativeUiUrl
-          ? `<p><a href="${job.nativeUiUrl}" target="_blank" rel="noreferrer">Open native Flink UI</a></p>`
-          : '<p class="muted">No native Flink UI URL available.</p>'
+        proxyHref
+          ? `<p><a href="${proxyHref}" target="_blank" rel="noreferrer">Open JobManager UI</a></p>`
+          : '<p class="muted">No usable JobManager UI URL available.</p>'
       }
       ${
         job.warnings?.length
@@ -268,6 +278,10 @@ function renderSessionAction(session) {
   }
 
   return `<a class="primary-button" href="${session.loginUrl || '/auth/login'}">Sign in</a>`;
+}
+
+function hasUsableJobManagerUrl(value) {
+  return /^https?:\/\//i.test(String(value || ''));
 }
 
 function escapeHtml(value) {

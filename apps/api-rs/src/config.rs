@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub oidc_request_timeout_ms: u64,
     pub oidc: Option<OidcConfig>,
     pub session: SessionConfig,
+    pub allow_loopback_jobmanager_targets: bool,
     pub clusters: Vec<ClusterConfig>,
 }
 
@@ -56,6 +57,7 @@ pub struct ClusterConfig {
     pub insecure_skip_tls_verify: bool,
     pub namespaces: Vec<String>,
     pub flink_api_version: String,
+    pub derive_jobmanager_url_in_cluster: bool,
     #[allow(dead_code)]
     pub flink_rest_base_url: Option<String>,
 }
@@ -101,6 +103,7 @@ impl AppConfig {
                 .unwrap_or(default_oidc_request_timeout_ms(request_timeout_ms)),
             oidc,
             session,
+            allow_loopback_jobmanager_targets: false,
             clusters,
         };
 
@@ -318,6 +321,7 @@ fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<Cluste
                 flink_api_version: cluster
                     .flink_api_version
                     .unwrap_or_else(|| "v1beta1".to_owned()),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: cluster.flink_rest_base_url,
             })
         })
@@ -362,6 +366,7 @@ fn default_cluster_from_env() -> Result<Vec<ClusterConfig>> {
             .collect(),
         flink_api_version: env::var("FLINK_K8S_API_VERSION")
             .unwrap_or_else(|_| "v1beta1".to_owned()),
+        derive_jobmanager_url_in_cluster: true,
         flink_rest_base_url: env::var("FLINK_REST_BASE_URL").ok(),
     }])
 }
@@ -464,6 +469,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: Vec::new(),
         };
 
@@ -484,6 +490,7 @@ mod tests {
             oidc_request_timeout_ms: 15_000,
             oidc: None,
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: Vec::new(),
         };
 
@@ -510,6 +517,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "profile".to_owned()],
             }),
             session: session_config(),
+            allow_loopback_jobmanager_targets: false,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: "https://kubernetes.example.com".to_owned(),
@@ -518,6 +526,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: None,
             }],
         };
@@ -548,6 +557,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "profile".to_owned()],
             }),
             session,
+            allow_loopback_jobmanager_targets: false,
             clusters: vec![ClusterConfig {
                 name: "demo".to_owned(),
                 api_url: "https://kubernetes.example.com".to_owned(),
@@ -556,6 +566,7 @@ mod tests {
                 insecure_skip_tls_verify: false,
                 namespaces: vec!["analytics".to_owned()],
                 flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
                 flink_rest_base_url: None,
             }],
         };
