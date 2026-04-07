@@ -421,4 +421,4 @@ Current CI behavior:
 
 ## License
 
-No license file is currently included in this repository.
+Do What The F*ck You Want To Public License
