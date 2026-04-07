@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/apps/api-rs"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Ho_Chi_Minh
+    target-branch: main
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Ho_Chi_Minh
+    target-branch: main
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+
+  - package-ecosystem: docker
+    directory: "/deploy/api"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Ho_Chi_Minh
+    target-branch: main
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
