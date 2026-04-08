@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use axum::Json;
@@ -43,7 +44,7 @@ pub struct JobResponse {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     error: String,
-    details: String,
+    details: Cow<'static, str>,
 }
 
 const PUBLIC_UPSTREAM_ERROR_DETAILS: &str =
@@ -143,21 +144,21 @@ fn internal_error(message: &str, error: anyhow::Error) -> (StatusCode, Json<Erro
     )
 }
 
-fn not_found(message: &str) -> (StatusCode, Json<ErrorResponse>) {
+fn not_found(message: &'static str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
             error: message.to_owned(),
-            details: message.to_owned(),
+            details: Cow::Borrowed(message),
         }),
     )
 }
 
-fn public_error_details(error: &anyhow::Error) -> &'static str {
+fn public_error_details(error: &anyhow::Error) -> Cow<'static, str> {
     if error.downcast_ref::<UpstreamHttpError>().is_some() {
-        PUBLIC_UPSTREAM_ERROR_DETAILS
+        Cow::Borrowed(PUBLIC_UPSTREAM_ERROR_DETAILS)
     } else {
-        PUBLIC_INTERNAL_ERROR_DETAILS
+        Cow::Borrowed(PUBLIC_INTERNAL_ERROR_DETAILS)
     }
 }
 

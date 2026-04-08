@@ -31,9 +31,7 @@ pub async fn enrich_jobs(
         }
         Err(error) => {
             warn!(error = %error, cluster = %cluster.name, "flink_rest_client_build_failed");
-            jobs.into_iter()
-                .map(|job| with_warning(job, PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned()))
-                .collect()
+            jobs.into_iter().map(with_public_flink_warning).collect()
         }
     }
 }
@@ -54,37 +52,31 @@ async fn enrich_job(client: &Client, cluster: &ClusterConfig, job: Job) -> Job {
                 trusted_base_url = %trusted_base_url,
                 "flink_rest_overview_url_build_failed"
             );
-            return with_warning(job, PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned());
+            return with_public_flink_warning(job);
         }
     };
-    let job_id = job.id.clone();
-    let job_name = job.job_name.clone();
-    let cluster_name = cluster.name.clone();
-    let overview_url_for_log = overview_url.clone();
-    let trusted_base_url_for_log = trusted_base_url.clone();
-    let native_ui_url_for_log = job.native_ui_url.clone();
     let native_ui_warning = native_ui_url_warning(&trusted_base_url, &job);
     let job = with_native_ui_url_warning(job, native_ui_warning);
 
-    match request_json(client, overview_url).await {
+    match request_json(client, &overview_url).await {
         Ok(payload) => merge_overview(job, payload),
         Err(error) => {
             warn!(
+                cluster = %cluster.name,
+                job_id = %job.id,
+                job_name = %job.job_name,
+                trusted_base_url = %trusted_base_url,
+                overview_url = %overview_url,
+                native_ui_url = job.native_ui_url.as_deref().unwrap_or("<none>"),
                 error = %error,
-                cluster = %cluster_name,
-                job_id = %job_id,
-                job_name = %job_name,
-                trusted_base_url = %trusted_base_url_for_log,
-                overview_url = %overview_url_for_log,
-                native_ui_url = native_ui_url_for_log.as_deref().unwrap_or("<none>"),
                 "flink_rest_enrichment_failed"
             );
-            with_warning(job, PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned())
+            with_public_flink_warning(job)
         }
     }
 }
 
-async fn request_json(client: &Client, url: Url) -> Result<Value, String> {
+async fn request_json(client: &Client, url: &Url) -> Result<Value, String> {
     let response = client
         .get(url.clone())
         .header("Accept", "application/json")
@@ -162,6 +154,14 @@ fn merge_overview(mut job: Job, payload: Value) -> Job {
 fn with_warning(mut job: Job, warning: String) -> Job {
     job.warnings.push(warning);
     job
+}
+
+fn with_public_flink_warning(job: Job) -> Job {
+    with_warning(job, public_flink_enrichment_warning())
+}
+
+fn public_flink_enrichment_warning() -> String {
+    PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned()
 }
 
 fn overview_url(base_url: &Url) -> Result<Url, String> {
