@@ -135,7 +135,7 @@ fn overview_url(base_url: &Url) -> Result<Url, String> {
     let mut overview_url = base_url.clone();
     let mut segments = overview_url
         .path_segments_mut()
-        .map_err(|_| "trusted Flink REST base URL cannot be a cannot-be-a-base URL".to_owned())?;
+        .map_err(|_| "trusted Flink REST base URL must be a base URL".to_owned())?;
     segments.pop_if_empty();
     segments.push("jobs");
     segments.push("overview");
