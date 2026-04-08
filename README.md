@@ -294,7 +294,7 @@ Supported object fields:
 | `bearerTokenFile`       | token file path                      |
 | `caCert`                | inline CA certificate                |
 | `caCertFile`            | CA certificate file path             |
-| `insecureSkipTlsVerify` | disable TLS verification             |
+| `insecureSkipTlsVerify` | disable Kubernetes TLS verification for explicit localhost/loopback dev targets only |
 | `namespaces`            | watched namespaces                   |
 | `flinkApiVersion`       | Flink operator API version           |
 | `flinkRestBaseUrl`      | explicit trusted Flink REST base URL |
@@ -309,7 +309,7 @@ If `FLINK_UI_CLUSTERS_JSON` is not set, the app can derive a cluster from enviro
 | `K8S_BEARER_TOKEN`             | Kubernetes bearer token             |
 | `K8S_CA_CERT`                  | Kubernetes CA certificate           |
 | `K8S_CLUSTER_NAME`             | cluster display name                |
-| `K8S_INSECURE_SKIP_TLS_VERIFY` | disable Kubernetes TLS verification |
+| `K8S_INSECURE_SKIP_TLS_VERIFY` | disable Kubernetes TLS verification for explicit localhost/loopback dev targets only |
 | `WATCH_NAMESPACES`             | comma-separated namespaces          |
 | `FLINK_K8S_API_VERSION`        | Flink operator API version          |
 | `FLINK_REST_BASE_URL`          | trusted Flink REST base URL         |
@@ -317,6 +317,8 @@ If `FLINK_UI_CLUSTERS_JSON` is not set, the app can derive a cluster from enviro
 When the app derives its cluster config from the in-cluster `K8S_*` / service-account path, it also auto-derives a `FlinkDeployment` JobManager UI base URL as `http://<metadata.name>-rest.<metadata.namespace>.svc:8081/` if the operator status omits `status.jobManagerUrl`. Explicit status URLs still win for UI linking, and `FlinkSessionJob` remains best-effort.
 
 Live Flink REST enrichment fetches `/jobs/overview` only from the trusted `FLINK_REST_BASE_URL` (or the internally derived in-cluster `FlinkDeployment` service URL). Status-reported JobManager URLs are treated as display metadata for the UI; if they point outside the trusted origin, the API surfaces a warning instead of issuing an outbound request to that host.
+
+In live/runtime mode, the Rust backend rejects `K8S_INSECURE_SKIP_TLS_VERIFY=true` (or JSON `insecureSkipTlsVerify: true`) unless the Kubernetes API URL itself points at `localhost`, `*.localhost`, `127.0.0.1`, or another loopback address for explicit local development. Do not use insecure TLS bypass for in-cluster or remote/shared clusters.
 
 If `K8S_API_URL` is not set, the app can derive one from:
 
