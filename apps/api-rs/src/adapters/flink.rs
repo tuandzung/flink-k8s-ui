@@ -4,9 +4,13 @@ use reqwest::{Client, Url};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 
 use crate::config::ClusterConfig;
 use crate::domain::job::{FlinkRestOverview, Job};
+
+const PUBLIC_FLINK_ENRICHMENT_WARNING: &str =
+    "Flink REST enrichment is unavailable; check server logs for details";
 
 pub async fn enrich_jobs(
     jobs: Vec<Job>,
@@ -25,10 +29,10 @@ pub async fn enrich_jobs(
             }
             enriched
         }
-        Err(error) => jobs
-            .into_iter()
-            .map(|job| with_warning(job, format!("Flink REST enrichment failed: {}", error)))
-            .collect(),
+        Err(error) => {
+            warn!(error = %error, cluster = %cluster.name, "flink_rest_client_build_failed");
+            jobs.into_iter().map(with_public_flink_warning).collect()
+        }
     }
 }
 
@@ -40,18 +44,39 @@ async fn enrich_job(client: &Client, cluster: &ClusterConfig, job: Job) -> Job {
 
     let overview_url = match overview_url(&trusted_base_url) {
         Ok(url) => url,
-        Err(error) => return with_warning(job, format!("Flink REST enrichment failed: {}", error)),
+        Err(error) => {
+            warn!(
+                error = %error,
+                cluster = %cluster.name,
+                job_id = %job.id,
+                trusted_base_url = %trusted_base_url,
+                "flink_rest_overview_url_build_failed"
+            );
+            return with_public_flink_warning(job);
+        }
     };
     let native_ui_warning = native_ui_url_warning(&trusted_base_url, &job);
     let job = with_native_ui_url_warning(job, native_ui_warning);
 
-    match request_json(client, overview_url).await {
+    match request_json(client, &overview_url).await {
         Ok(payload) => merge_overview(job, payload),
-        Err(error) => with_warning(job, format!("Flink REST enrichment failed: {}", error)),
+        Err(error) => {
+            warn!(
+                cluster = %cluster.name,
+                job_id = %job.id,
+                job_name = %job.job_name,
+                trusted_base_url = %trusted_base_url,
+                overview_url = %overview_url,
+                native_ui_url = job.native_ui_url.as_deref().unwrap_or("<none>"),
+                error = %error,
+                "flink_rest_enrichment_failed"
+            );
+            with_public_flink_warning(job)
+        }
     }
 }
 
-async fn request_json(client: &Client, url: Url) -> Result<Value, String> {
+async fn request_json(client: &Client, url: &Url) -> Result<Value, String> {
     let response = client
         .get(url.clone())
         .header("Accept", "application/json")
@@ -129,6 +154,14 @@ fn merge_overview(mut job: Job, payload: Value) -> Job {
 fn with_warning(mut job: Job, warning: String) -> Job {
     job.warnings.push(warning);
     job
+}
+
+fn with_public_flink_warning(job: Job) -> Job {
+    with_warning(job, public_flink_enrichment_warning())
+}
+
+fn public_flink_enrichment_warning() -> String {
+    PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned()
 }
 
 fn overview_url(base_url: &Url) -> Result<Url, String> {
@@ -336,7 +369,34 @@ mod tests {
         )
         .await;
 
-        assert!(jobs[0].warnings[0].starts_with("Flink REST enrichment failed: Flink REST 503:"));
+        assert_eq!(
+            jobs[0].warnings,
+            vec![PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned()]
+        );
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn enrich_jobs_warns_generically_when_flink_rest_payload_is_invalid() {
+        let mock = start_mock_text_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            "not-json".to_owned(),
+        )])
+        .await;
+
+        let jobs = enrich_jobs(
+            vec![test_job(Some(format!("{}/orders-stream/", mock.base_url)))],
+            &test_cluster(Some(mock.base_url.clone())),
+            500,
+        )
+        .await;
+
+        assert_eq!(
+            jobs[0].warnings,
+            vec![PUBLIC_FLINK_ENRICHMENT_WARNING.to_owned()]
+        );
 
         mock.shutdown();
     }
@@ -464,6 +524,40 @@ mod tests {
                         }
                         None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
                             .into_response(),
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
+        });
+
+        MockServer {
+            base_url: format!("http://{}", address),
+            task,
+        }
+    }
+
+    async fn start_mock_text_server(responses: Vec<(String, StatusCode, String)>) -> MockServer {
+        let shared = Arc::new(responses);
+        let app = Router::new().fallback(get({
+            let shared = Arc::clone(&shared);
+            move |uri: OriginalUri| {
+                let shared = Arc::clone(&shared);
+                async move {
+                    let path = uri.path().to_owned();
+                    let maybe = shared.iter().find(|(candidate, _, _)| candidate == &path);
+                    match maybe {
+                        Some((_, status, body)) => (*status, body.clone()).into_response(),
+                        None => (StatusCode::NOT_FOUND, "not found".to_owned()).into_response(),
                     }
                 }
             }
