@@ -73,6 +73,9 @@ fn build_namespace_paths(cluster: &ClusterConfig, plural: &str) -> Vec<String> {
 }
 
 fn build_client(cluster: &ClusterConfig, request_timeout_ms: u64) -> Result<Client> {
+    cluster
+        .validate_kubernetes_tls_policy()
+        .context("refusing to build Kubernetes client")?;
     let mut builder =
         Client::builder().timeout(std::time::Duration::from_millis(request_timeout_ms));
 
@@ -261,6 +264,17 @@ mod tests {
         );
 
         mock.shutdown();
+    }
+
+    #[test]
+    fn build_client_rejects_insecure_tls_bypass_for_non_loopback_cluster() {
+        let mut cluster = cluster("https://kubernetes.example.com");
+        cluster.insecure_skip_tls_verify = true;
+
+        let error = build_client(&cluster, 1_000)
+            .expect_err("non-loopback insecure TLS bypass should be rejected");
+
+        assert!(format!("{error:#}").contains("K8S_INSECURE_SKIP_TLS_VERIFY"));
     }
 
     struct MockServer {

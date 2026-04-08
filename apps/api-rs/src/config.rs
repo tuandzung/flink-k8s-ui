@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -63,6 +64,37 @@ pub struct ClusterConfig {
     pub flink_rest_base_url: Option<String>,
 }
 
+impl ClusterConfig {
+    pub fn validate_kubernetes_tls_policy(&self) -> Result<()> {
+        if self.insecure_skip_tls_verify
+            && !self.allows_insecure_kubernetes_tls_bypass_for_local_dev()
+        {
+            bail!(
+                "cluster `{}` enables insecure Kubernetes TLS verification bypass for `{}`; K8S_INSECURE_SKIP_TLS_VERIFY/insecureSkipTlsVerify is only allowed for localhost or loopback Kubernetes API URLs in local development",
+                self.name,
+                self.api_url
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn allows_insecure_kubernetes_tls_bypass_for_local_dev(&self) -> bool {
+        let Ok(parsed) = Url::parse(&self.api_url) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
+
+        host.eq_ignore_ascii_case("localhost")
+            || host.ends_with(".localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let root_dir = detect_root_dir()?;
@@ -121,6 +153,10 @@ impl AppConfig {
             let Some(oidc) = &self.oidc else {
                 bail!("fixture mode is disabled but OIDC settings are missing")
             };
+
+            for cluster in &self.clusters {
+                cluster.validate_kubernetes_tls_policy()?;
+            }
 
             if oidc.scopes.is_empty() {
                 bail!("OIDC scopes must include at least openid")
@@ -618,5 +654,84 @@ mod tests {
             .validate()
             .expect_err("http external base URL should reject secure cookies");
         assert!(error.to_string().contains("SESSION_SECURE_COOKIE=true"));
+    }
+
+    #[test]
+    fn live_config_rejects_insecure_k8s_tls_bypass_for_non_loopback_cluster() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
+            oidc: Some(OidcConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "client-id".to_owned(),
+                client_secret: "client-secret".to_owned(),
+                external_base_url: "https://flink.example.com".to_owned(),
+                callback_path: "/auth/callback".to_owned(),
+                scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            }),
+            session: session_config(),
+            allow_loopback_jobmanager_targets: false,
+            clusters: vec![ClusterConfig {
+                name: "prod".to_owned(),
+                api_url: "https://kubernetes.example.com".to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: true,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
+                flink_rest_base_url: None,
+            }],
+        };
+
+        let error = config
+            .validate()
+            .expect_err("non-loopback insecure TLS bypass should reject in live mode");
+        assert!(error.to_string().contains("K8S_INSECURE_SKIP_TLS_VERIFY"));
+    }
+
+    #[test]
+    fn live_config_allows_insecure_k8s_tls_bypass_for_loopback_cluster() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
+            oidc: Some(OidcConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "client-id".to_owned(),
+                client_secret: "client-secret".to_owned(),
+                external_base_url: "https://flink.example.com".to_owned(),
+                callback_path: "/auth/callback".to_owned(),
+                scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            }),
+            session: session_config(),
+            allow_loopback_jobmanager_targets: false,
+            clusters: vec![ClusterConfig {
+                name: "kind".to_owned(),
+                api_url: "https://127.0.0.1:6443".to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: true,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
+                flink_rest_base_url: None,
+            }],
+        };
+
+        config
+            .validate()
+            .expect("loopback insecure TLS bypass should stay available for local dev");
     }
 }

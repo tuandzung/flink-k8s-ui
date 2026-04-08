@@ -62,6 +62,8 @@ Provide either:
 1. `FLINK_UI_CLUSTERS_JSON` with one or more cluster objects, or
 2. in-cluster variables such as `KUBERNETES_SERVICE_HOST` plus mounted service account token
 
+If your local-development Kubernetes API is exposed on `localhost`, `*.localhost`, or another loopback address and uses a self-signed certificate, you may set `K8S_INSECURE_SKIP_TLS_VERIFY=true` (or JSON `insecureSkipTlsVerify: true`) as an explicit local-only escape hatch. The Rust runtime rejects that bypass for non-loopback / production-style cluster URLs.
+
 Example:
 
 ```bash
