@@ -277,6 +277,18 @@ mod tests {
         assert!(format!("{error:#}").contains("K8S_INSECURE_SKIP_TLS_VERIFY"));
     }
 
+    #[test]
+    fn build_client_reports_invalid_k8s_api_url_for_insecure_tls_bypass() {
+        let mut cluster = cluster("not a url");
+        cluster.insecure_skip_tls_verify = true;
+
+        let error = build_client(&cluster, 1_000)
+            .expect_err("invalid Kubernetes API URL should be reported explicitly");
+
+        assert!(format!("{error:#}").contains("invalid Kubernetes API URL"));
+        assert!(!format!("{error:#}").contains("only allowed for localhost or loopback"));
+    }
+
     struct MockServer {
         base_url: String,
         task: JoinHandle<()>,

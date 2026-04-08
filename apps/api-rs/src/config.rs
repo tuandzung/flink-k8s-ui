@@ -66,33 +66,46 @@ pub struct ClusterConfig {
 
 impl ClusterConfig {
     pub fn validate_kubernetes_tls_policy(&self) -> Result<()> {
-        if self.insecure_skip_tls_verify
-            && !self.allows_insecure_kubernetes_tls_bypass_for_local_dev()
-        {
+        if !self.insecure_skip_tls_verify {
+            return Ok(());
+        }
+
+        let host = self.kubernetes_api_url_host_for_tls_policy()?;
+        if !allows_insecure_kubernetes_tls_bypass_for_local_dev(&host) {
             bail!(
                 "cluster `{}` enables insecure Kubernetes TLS verification bypass for `{}`; K8S_INSECURE_SKIP_TLS_VERIFY/insecureSkipTlsVerify is only allowed for localhost or loopback Kubernetes API URLs in local development",
                 self.name,
                 self.api_url
             );
-        }
+        };
 
         Ok(())
     }
 
-    pub fn allows_insecure_kubernetes_tls_bypass_for_local_dev(&self) -> bool {
-        let Ok(parsed) = Url::parse(&self.api_url) else {
-            return false;
-        };
-        let Some(host) = parsed.host_str() else {
-            return false;
-        };
+    fn kubernetes_api_url_host_for_tls_policy(&self) -> Result<String> {
+        let error_message = self.invalid_kubernetes_api_url_error();
+        let parsed = Url::parse(&self.api_url).with_context(|| error_message.clone())?;
 
-        host.eq_ignore_ascii_case("localhost")
-            || host.ends_with(".localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
+        parsed
+            .host_str()
+            .map(ToOwned::to_owned)
+            .with_context(|| error_message)
     }
+
+    fn invalid_kubernetes_api_url_error(&self) -> String {
+        format!(
+            "cluster `{}` has an invalid Kubernetes API URL `{}`",
+            self.name, self.api_url
+        )
+    }
+}
+
+fn allows_insecure_kubernetes_tls_bypass_for_local_dev(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 impl AppConfig {
@@ -733,5 +746,50 @@ mod tests {
         config
             .validate()
             .expect("loopback insecure TLS bypass should stay available for local dev");
+    }
+
+    #[test]
+    fn live_config_reports_invalid_k8s_api_url_for_insecure_tls_bypass() {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3000,
+            root_dir: workspace_root(),
+            fixture_mode: false,
+            fixture_file: workspace_root().join("fixtures/jobs.json"),
+            cache_ttl_ms: 0,
+            request_timeout_ms: 1_000,
+            oidc_request_timeout_ms: 15_000,
+            oidc: Some(OidcConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "client-id".to_owned(),
+                client_secret: "client-secret".to_owned(),
+                external_base_url: "https://flink.example.com".to_owned(),
+                callback_path: "/auth/callback".to_owned(),
+                scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            }),
+            session: session_config(),
+            allow_loopback_jobmanager_targets: false,
+            clusters: vec![ClusterConfig {
+                name: "broken".to_owned(),
+                api_url: "not a url".to_owned(),
+                bearer_token: "token".to_owned(),
+                ca_cert: None,
+                insecure_skip_tls_verify: true,
+                namespaces: vec!["analytics".to_owned()],
+                flink_api_version: "v1beta1".to_owned(),
+                derive_jobmanager_url_in_cluster: false,
+                flink_rest_base_url: None,
+            }],
+        };
+
+        let error = config
+            .validate()
+            .expect_err("invalid Kubernetes API URL should be reported explicitly");
+        assert!(error.to_string().contains("invalid Kubernetes API URL"));
+        assert!(
+            !error
+                .to_string()
+                .contains("only allowed for localhost or loopback")
+        );
     }
 }
