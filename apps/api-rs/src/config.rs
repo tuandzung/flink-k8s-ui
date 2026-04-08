@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reqwest::Url;
 use serde::Deserialize;
 
 const SERVICE_ACCOUNT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -67,7 +68,7 @@ impl AppConfig {
         let root_dir = detect_root_dir()?;
         let configured_clusters = normalize_clusters(parse_json::<Vec<RawClusterConfig>>(
             &env::var("FLINK_UI_CLUSTERS_JSON").ok(),
-        )?);
+        )?)?;
         let clusters = if configured_clusters.is_empty() {
             default_cluster_from_env()?
         } else {
@@ -276,8 +277,20 @@ fn normalize_base_url(value: &str) -> Result<String> {
     if trimmed.is_empty() {
         bail!("base URL cannot be empty")
     }
+    let parsed = Url::parse(trimmed).context("base URL must be a valid absolute URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("base URL must use http or https")
+    }
 
     Ok(trimmed.to_owned())
+}
+
+fn normalize_optional_base_url(value: Option<String>) -> Result<Option<String>> {
+    match value {
+        Some(value) if value.trim().is_empty() => Ok(None),
+        Some(value) => normalize_base_url(&value).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn normalize_callback_path(value: &str) -> String {
@@ -291,7 +304,7 @@ fn normalize_callback_path(value: &str) -> String {
     }
 }
 
-fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<ClusterConfig> {
+fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Result<Vec<ClusterConfig>> {
     raw_clusters
         .unwrap_or_default()
         .into_iter()
@@ -303,26 +316,34 @@ fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<Cluste
                     .bearer_token_file
                     .and_then(|path| read_if_exists(path))
             });
+            let cluster_name = cluster
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("cluster-{}", index + 1));
 
-            bearer_token.map(|bearer_token| ClusterConfig {
-                name: cluster
-                    .name
-                    .unwrap_or_else(|| format!("cluster-{}", index + 1)),
-                api_url,
-                bearer_token,
-                ca_cert: cluster
-                    .ca_cert
-                    .or_else(|| cluster.ca_cert_file.and_then(|path| read_if_exists(path))),
-                insecure_skip_tls_verify: cluster.insecure_skip_tls_verify.unwrap_or(false),
-                namespaces: match cluster.namespaces {
-                    Some(namespaces) if !namespaces.is_empty() => namespaces,
-                    _ => vec!["default".to_owned()],
-                },
-                flink_api_version: cluster
-                    .flink_api_version
-                    .unwrap_or_else(|| "v1beta1".to_owned()),
-                derive_jobmanager_url_in_cluster: false,
-                flink_rest_base_url: cluster.flink_rest_base_url,
+            bearer_token.map(|bearer_token| {
+                normalize_optional_base_url(cluster.flink_rest_base_url)
+                    .with_context(|| {
+                        format!("cluster `{}` has an invalid flinkRestBaseUrl", cluster_name)
+                    })
+                    .map(|flink_rest_base_url| ClusterConfig {
+                        name: cluster_name,
+                        api_url,
+                        bearer_token,
+                        ca_cert: cluster
+                            .ca_cert
+                            .or_else(|| cluster.ca_cert_file.and_then(|path| read_if_exists(path))),
+                        insecure_skip_tls_verify: cluster.insecure_skip_tls_verify.unwrap_or(false),
+                        namespaces: match cluster.namespaces {
+                            Some(namespaces) if !namespaces.is_empty() => namespaces,
+                            _ => vec!["default".to_owned()],
+                        },
+                        flink_api_version: cluster
+                            .flink_api_version
+                            .unwrap_or_else(|| "v1beta1".to_owned()),
+                        derive_jobmanager_url_in_cluster: false,
+                        flink_rest_base_url,
+                    })
             })
         })
         .collect()
@@ -367,7 +388,8 @@ fn default_cluster_from_env() -> Result<Vec<ClusterConfig>> {
         flink_api_version: env::var("FLINK_K8S_API_VERSION")
             .unwrap_or_else(|_| "v1beta1".to_owned()),
         derive_jobmanager_url_in_cluster: true,
-        flink_rest_base_url: env::var("FLINK_REST_BASE_URL").ok(),
+        flink_rest_base_url: normalize_optional_base_url(env::var("FLINK_REST_BASE_URL").ok())
+            .context("invalid FLINK_REST_BASE_URL")?,
     }])
 }
 
@@ -400,7 +422,7 @@ fn looks_like_repo_root(path: &Path) -> bool {
 mod tests {
     use super::{
         AppConfig, ClusterConfig, OidcConfig, SessionConfig, default_oidc_request_timeout_ms,
-        normalize_base_url, normalize_callback_path, parse_scopes,
+        normalize_base_url, normalize_callback_path, normalize_optional_base_url, parse_scopes,
     };
     use std::path::PathBuf;
 
@@ -448,6 +470,27 @@ mod tests {
             normalize_base_url("https://example.com/").expect("base url should normalize"),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn normalize_optional_base_url_trims_and_drops_blank_values() {
+        assert_eq!(
+            normalize_optional_base_url(Some(" https://example.com/root/ ".to_owned()))
+                .expect("optional base URL should normalize"),
+            Some("https://example.com/root".to_owned())
+        );
+        assert_eq!(
+            normalize_optional_base_url(Some("   ".to_owned()))
+                .expect("blank optional base URL should normalize"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_optional_base_url_rejects_invalid_values() {
+        let error = normalize_optional_base_url(Some("not a url".to_owned()))
+            .expect_err("invalid optional base URL should fail");
+        assert!(error.to_string().contains("valid absolute URL"));
     }
 
     #[test]

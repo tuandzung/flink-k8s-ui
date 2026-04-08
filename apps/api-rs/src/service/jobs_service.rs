@@ -84,9 +84,10 @@ impl JobsService {
 
         let mut jobs = Vec::new();
         for cluster in &self.config.clusters {
-            jobs.extend(list_cluster_jobs(cluster, self.config.request_timeout_ms).await?);
+            let cluster_jobs = list_cluster_jobs(cluster, self.config.request_timeout_ms).await?;
+            jobs.extend(enrich_jobs(cluster_jobs, cluster, self.config.request_timeout_ms).await);
         }
-        Ok(enrich_jobs(jobs, self.config.request_timeout_ms).await)
+        Ok(jobs)
     }
 }
 
