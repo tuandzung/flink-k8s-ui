@@ -225,7 +225,7 @@ mod tests {
             ),
         ])
         .await;
-        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let app = start_app(live_config(&kubernetes.base_url, Some(&flink.base_url))).await;
         let client = Client::new();
 
         let jobs_response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
@@ -322,6 +322,149 @@ mod tests {
         app.shutdown();
         kubernetes.shutdown();
         flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_surfaces_warning_when_only_status_derived_jobmanager_url_exists() {
+        let flink = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({
+              "jobs": [{
+                "jid": "job-123",
+                "name": "orders-stream",
+                "state": "RUNNING"
+              }]
+            }),
+        )])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {
+                      "name": "orders-stream",
+                      "namespace": "analytics"
+                    },
+                    "spec": {
+                      "job": {"name": "orders-stream"}
+                    },
+                    "status": {
+                      "jobStatus": {"state": "READY"},
+                      "jobManagerUrl": format!("{}/orders-stream/", flink.base_url)
+                    }
+                  }]
+                }),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let jobs_response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
+            .send()
+            .await
+            .expect("jobs response should succeed");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_payload: Value = jobs_response
+            .json()
+            .await
+            .expect("jobs payload should be JSON");
+
+        assert_eq!(jobs_payload["jobs"][0]["flinkJobId"], Value::Null);
+        assert_eq!(
+            jobs_payload["jobs"][0]["details"]["flinkRestOverview"],
+            Value::Null
+        );
+        assert_eq!(
+            jobs_payload["jobs"][0]["warnings"],
+            json!(["Flink REST enrichment skipped: no trusted Flink REST base URL is configured"])
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
+        flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_surfaces_warning_when_status_jobmanager_url_is_outside_trusted_origin() {
+        let trusted = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({
+              "jobs": [{
+                "jid": "job-123",
+                "name": "orders-stream",
+                "state": "RUNNING"
+              }]
+            }),
+        )])
+        .await;
+        let untrusted = start_mock_json_server(vec![(
+            "/jobs/overview".to_owned(),
+            StatusCode::OK,
+            json!({"jobs":[]}),
+        )])
+        .await;
+        let kubernetes = start_mock_json_server(vec![
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments".to_owned(),
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {
+                      "name": "orders-stream",
+                      "namespace": "analytics"
+                    },
+                    "spec": {
+                      "job": {"name": "orders-stream"}
+                    },
+                    "status": {
+                      "jobStatus": {"state": "READY"},
+                      "jobManagerUrl": format!("{}/orders-stream/", untrusted.base_url)
+                    }
+                  }]
+                }),
+            ),
+            (
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs".to_owned(),
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, Some(&trusted.base_url))).await;
+        let client = Client::new();
+
+        let jobs_response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
+            .send()
+            .await
+            .expect("jobs response should succeed");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_payload: Value = jobs_response
+            .json()
+            .await
+            .expect("jobs payload should be JSON");
+
+        assert_eq!(jobs_payload["jobs"][0]["flinkJobId"], "job-123");
+        assert_eq!(
+            jobs_payload["jobs"][0]["warnings"],
+            json!(["Flink REST enrichment ignored a JobManager URL outside the trusted origin"])
+        );
+
+        app.shutdown();
+        kubernetes.shutdown();
+        untrusted.shutdown();
+        trusted.shutdown();
     }
 
     #[tokio::test]

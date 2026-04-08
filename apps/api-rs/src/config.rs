@@ -280,6 +280,12 @@ fn normalize_base_url(value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+fn normalize_optional_base_url(value: Option<String>) -> Option<String> {
+    value
+        .and_then(|value| normalize_base_url(&value).ok())
+        .filter(|value| !value.is_empty())
+}
+
 fn normalize_callback_path(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -322,7 +328,7 @@ fn normalize_clusters(raw_clusters: Option<Vec<RawClusterConfig>>) -> Vec<Cluste
                     .flink_api_version
                     .unwrap_or_else(|| "v1beta1".to_owned()),
                 derive_jobmanager_url_in_cluster: false,
-                flink_rest_base_url: cluster.flink_rest_base_url,
+                flink_rest_base_url: normalize_optional_base_url(cluster.flink_rest_base_url),
             })
         })
         .collect()
@@ -367,7 +373,7 @@ fn default_cluster_from_env() -> Result<Vec<ClusterConfig>> {
         flink_api_version: env::var("FLINK_K8S_API_VERSION")
             .unwrap_or_else(|_| "v1beta1".to_owned()),
         derive_jobmanager_url_in_cluster: true,
-        flink_rest_base_url: env::var("FLINK_REST_BASE_URL").ok(),
+        flink_rest_base_url: normalize_optional_base_url(env::var("FLINK_REST_BASE_URL").ok()),
     }])
 }
 
@@ -400,7 +406,7 @@ fn looks_like_repo_root(path: &Path) -> bool {
 mod tests {
     use super::{
         AppConfig, ClusterConfig, OidcConfig, SessionConfig, default_oidc_request_timeout_ms,
-        normalize_base_url, normalize_callback_path, parse_scopes,
+        normalize_base_url, normalize_callback_path, normalize_optional_base_url, parse_scopes,
     };
     use std::path::PathBuf;
 
@@ -448,6 +454,15 @@ mod tests {
             normalize_base_url("https://example.com/").expect("base url should normalize"),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn normalize_optional_base_url_trims_and_drops_blank_values() {
+        assert_eq!(
+            normalize_optional_base_url(Some(" https://example.com/root/ ".to_owned())),
+            Some("https://example.com/root".to_owned())
+        );
+        assert_eq!(normalize_optional_base_url(Some("   ".to_owned())), None);
     }
 
     #[test]

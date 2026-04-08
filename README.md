@@ -314,7 +314,9 @@ If `FLINK_UI_CLUSTERS_JSON` is not set, the app can derive a cluster from enviro
 | `FLINK_K8S_API_VERSION`        | Flink operator API version          |
 | `FLINK_REST_BASE_URL`          | trusted Flink REST base URL         |
 
-When the app derives its cluster config from the in-cluster `K8S_*` / service-account path, it also auto-derives a `FlinkDeployment` JobManager UI base URL as `http://<metadata.name>-rest.<metadata.namespace>.svc:8081/` if the operator status omits `status.jobManagerUrl`. Explicit status URLs still win, and `FlinkSessionJob` remains best-effort.
+When the app derives its cluster config from the in-cluster `K8S_*` / service-account path, it also auto-derives a `FlinkDeployment` JobManager UI base URL as `http://<metadata.name>-rest.<metadata.namespace>.svc:8081/` if the operator status omits `status.jobManagerUrl`. Explicit status URLs still win for UI linking, and `FlinkSessionJob` remains best-effort.
+
+Live Flink REST enrichment fetches `/jobs/overview` only from the trusted `FLINK_REST_BASE_URL` (or the internally derived in-cluster `FlinkDeployment` service URL). Status-reported JobManager URLs are treated as display metadata for the UI; if they point outside the trusted origin, the API surfaces a warning instead of issuing an outbound request to that host.
 
 If `K8S_API_URL` is not set, the app can derive one from:
 
@@ -410,6 +412,7 @@ Current CI behavior:
 - read-only dashboard only; no suspend/cancel/savepoint actions
 - local dev defaults to fixture mode rather than a live cluster
 - Flink REST enrichment is best-effort and should never block job listing
+- Flink REST enrichment only calls trusted configured origins (`flinkRestBaseUrl` / `FLINK_REST_BASE_URL`) or the server-derived in-cluster `FlinkDeployment` service URL; status-derived URLs are warning-only for enrichment decisions
 - JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in v1
 - `FlinkSessionJob` collection is also best-effort
 - production access control depends on correct ingress/reverse-proxy configuration
