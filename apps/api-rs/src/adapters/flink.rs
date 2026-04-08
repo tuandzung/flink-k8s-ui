@@ -370,6 +370,25 @@ mod tests {
         mock.shutdown();
     }
 
+    #[tokio::test]
+    async fn enrich_jobs_does_not_auto_trust_derived_in_cluster_urls_for_session_jobs() {
+        let mut job = test_job(None);
+        job.kind = "FlinkSessionJob".to_owned();
+
+        let mut cluster = test_cluster(None);
+        cluster.derive_jobmanager_url_in_cluster = true;
+
+        let jobs = enrich_jobs(vec![job], &cluster, 500).await;
+
+        assert_eq!(
+            jobs[0].warnings,
+            vec![
+                "Flink REST enrichment unavailable: no trusted Flink REST base URL for FlinkSessionJob"
+                    .to_owned()
+            ]
+        );
+    }
+
     struct MockServer {
         base_url: String,
         task: JoinHandle<()>,
