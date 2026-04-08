@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::Serialize;
+use tracing::error;
 
 use crate::domain::job::Job;
 use crate::error::UpstreamHttpError;
@@ -44,6 +45,11 @@ pub struct ErrorResponse {
     error: String,
     details: String,
 }
+
+const PUBLIC_UPSTREAM_ERROR_DETAILS: &str =
+    "The upstream request failed; check server logs for details";
+const PUBLIC_INTERNAL_ERROR_DETAILS: &str =
+    "The server could not complete the request; check server logs for details";
 
 pub async fn list_jobs(
     State(state): State<AppState>,
@@ -118,12 +124,21 @@ fn internal_error(message: &str, error: anyhow::Error) -> (StatusCode, Json<Erro
         .downcast_ref::<UpstreamHttpError>()
         .and_then(|error| StatusCode::from_u16(error.status_code).ok())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let error_chain = format_error_chain(&error);
+
+    error!(
+        public_error = message,
+        response_status = status_code.as_u16(),
+        error = %error,
+        error_chain = %error_chain,
+        "jobs_request_failed"
+    );
 
     (
         status_code,
         Json(ErrorResponse {
             error: message.to_owned(),
-            details: error.to_string(),
+            details: public_error_details(&error).to_owned(),
         }),
     )
 }
@@ -136,4 +151,20 @@ fn not_found(message: &str) -> (StatusCode, Json<ErrorResponse>) {
             details: message.to_owned(),
         }),
     )
+}
+
+fn public_error_details(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<UpstreamHttpError>().is_some() {
+        PUBLIC_UPSTREAM_ERROR_DETAILS
+    } else {
+        PUBLIC_INTERNAL_ERROR_DETAILS
+    }
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }

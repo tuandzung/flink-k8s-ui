@@ -158,6 +158,7 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::net::TcpListener as StdTcpListener;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -485,15 +486,63 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let payload: Value = response.json().await.expect("payload should be JSON");
         assert_eq!(payload["error"], "Failed to list jobs");
+        assert_eq!(
+            payload["details"],
+            "The upstream request failed; check server logs for details"
+        );
         assert!(
-            payload["details"]
+            !payload["details"]
                 .as_str()
                 .expect("details should be a string")
                 .contains("Kubernetes API 403")
         );
+        assert!(
+            !payload["details"]
+                .as_str()
+                .expect("details should be a string")
+                .contains("/apis/flink.apache.org")
+        );
+        assert!(
+            !payload["details"]
+                .as_str()
+                .expect("details should be a string")
+                .contains("forbidden")
+        );
 
         app.shutdown();
         kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_sanitizes_network_failures_from_job_list_responses() {
+        let app = start_app(live_config(&unused_local_url(), None)).await;
+        let client = Client::new();
+
+        let response = authorized(&app, client.get(format!("{}/api/jobs", app.base_url)))
+            .send()
+            .await
+            .expect("response should succeed");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Failed to list jobs");
+        assert_eq!(
+            payload["details"],
+            "The server could not complete the request; check server logs for details"
+        );
+        assert!(
+            !payload["details"]
+                .as_str()
+                .expect("details should be a string")
+                .contains("Connection refused")
+        );
+        assert!(
+            !payload["details"]
+                .as_str()
+                .expect("details should be a string")
+                .contains("failed to fetch")
+        );
+
+        app.shutdown();
     }
 
     #[tokio::test]
@@ -1386,6 +1435,15 @@ mod tests {
             .redirect(Policy::none())
             .build()
             .expect("client should build")
+    }
+
+    fn unused_local_url() -> String {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("unused port should bind");
+        let address = listener
+            .local_addr()
+            .expect("unused port should have local address");
+        drop(listener);
+        format!("http://{}", address)
     }
 
     #[derive(Clone)]
