@@ -386,6 +386,7 @@ Example manifests live under:
 - `deploy/api/deployment.yaml`
 - `deploy/api/service.yaml`
 - `deploy/api/ingress.yaml`
+- `deploy/rbac/api-reader.yaml`
 
 The included deployment assumes:
 
@@ -396,6 +397,8 @@ The included deployment assumes:
 - `/metrics` should not be publicly exposed without protection
 - same-domain JobManager UI proxying depends on the app pod being able to reach the in-cluster JobManager REST service; when `status.jobManagerUrl` is missing, the app derives `FlinkDeployment` URLs as `http://<name>-rest.<namespace>.svc:8081/`
 - the v1 JobManager proxy stays read-only and does not support websocket/upgrade flows
+- action-enabled deployments also need `deploy/rbac/api-reader.yaml`, which now grants `get,list,watch,patch,delete` on `flinkdeployments` and `flinksessionjobs`
+- because the example deployment watches `WATCH_NAMESPACES=analytics,payments`, apply the namespace-scoped RBAC manifest in each watched namespace (or adapt it to your cluster-wide RBAC model)
 
 ## CI
 
