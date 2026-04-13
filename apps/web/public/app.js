@@ -25,7 +25,14 @@ const state = {
     search: ''
   },
   selectedJob: null,
-  session: { ...DEFAULT_SESSION }
+  session: { ...DEFAULT_SESSION },
+  action: {
+    status: 'idle',
+    jobId: null,
+    action: null,
+    message: '',
+    deleted: false
+  }
 };
 
 const elements = {
@@ -103,7 +110,7 @@ async function bootstrapSession() {
   }
 }
 
-async function loadJobs() {
+async function loadJobs(options = {}) {
   if (!canLoadJobs()) {
     render();
     return;
@@ -123,11 +130,18 @@ async function loadJobs() {
     }
 
     state.jobs = payload.jobs;
+    const deletedSelectedJobId = options.deletedSelectedJobId || null;
     if (!state.selectedJob && state.jobs[0]) {
       state.selectedJob = state.jobs[0];
     } else if (state.selectedJob) {
-      state.selectedJob =
-        state.jobs.find((job) => job.id === state.selectedJob.id) || state.jobs[0] || null;
+      const refreshedSelection = state.jobs.find((job) => job.id === state.selectedJob.id);
+      if (refreshedSelection) {
+        state.selectedJob = refreshedSelection;
+      } else if (deletedSelectedJobId && deletedSelectedJobId === state.selectedJob.id) {
+        state.selectedJob = null;
+      } else {
+        state.selectedJob = state.jobs[0] || null;
+      }
     }
 
     render();
@@ -174,7 +188,7 @@ function render() {
   elements.filters.innerHTML = renderFilters(state.jobs, state.filters);
   elements.summary.innerHTML = `${renderSummary(filteredJobs)}${renderWarnings(filteredJobs)}`;
   elements.content.innerHTML = renderTable(filteredJobs);
-  elements.drawer.innerHTML = renderDrawer(state.selectedJob);
+  elements.drawer.innerHTML = renderDrawer(state.selectedJob, state.action);
 
   for (const key of ['cluster', 'namespace', 'status', 'search']) {
     const field = document.querySelector(`#${key}`);
@@ -191,7 +205,17 @@ function render() {
   document.querySelectorAll('[data-job-id]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedJob = state.jobs.find((job) => job.id === button.dataset.jobId) || null;
-      elements.drawer.innerHTML = renderDrawer(state.selectedJob);
+      elements.drawer.innerHTML = renderDrawer(state.selectedJob, state.action);
+    });
+  });
+
+  document.querySelectorAll('[data-job-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const job = state.jobs.find((candidate) => candidate.id === button.dataset.jobId);
+      if (!job) {
+        return;
+      }
+      submitJobAction(job, button.dataset.jobAction);
     });
   });
 }
@@ -210,6 +234,53 @@ function renderSignedOutDrawer(session) {
   }
 
   return '<p class="muted">Sign in to inspect deployment details, warnings, and cluster-specific job status.</p>';
+}
+
+async function submitJobAction(job, action) {
+  state.action = {
+    status: 'pending',
+    jobId: job.id,
+    action,
+    message: '',
+    deleted: false
+  };
+  render();
+
+  try {
+    const response = await fetch(jobActionHref(job, action), { method: 'POST' });
+    const payload = await readJson(response);
+
+    if (!response.ok) {
+      const error = new Error(payload.details || payload.error || 'Action failed.');
+      error.status = response.status;
+      throw error;
+    }
+
+    state.action = {
+      status: 'success',
+      jobId: job.id,
+      action,
+      message: payload.message || 'Action completed successfully.',
+      deleted: payload.deleted === true
+    };
+
+    await loadJobs({
+      deletedSelectedJobId: payload.deleted === true ? job.id : null
+    });
+  } catch (error) {
+    state.action = {
+      status: 'error',
+      jobId: job.id,
+      action,
+      message: error instanceof Error ? error.message : 'Action failed.',
+      deleted: false
+    };
+    render();
+  }
+}
+
+function jobActionHref(job, action) {
+  return `/api/jobs/${encodeURIComponent(job.cluster)}/${encodeURIComponent(job.namespace)}/${encodeURIComponent(job.kind)}/${encodeURIComponent(job.resourceName)}/actions/${encodeURIComponent(action)}`;
 }
 
 function normalizeSessionPayload(payload) {

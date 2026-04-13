@@ -10,7 +10,9 @@ use tower_http::services::ServeFile;
 use crate::http::handlers::auth::{callback, login, logout, session_status};
 use crate::http::handlers::health::{healthz, readyz};
 use crate::http::handlers::jobmanager_proxy::{proxy_jobmanager_path, proxy_jobmanager_root};
-use crate::http::handlers::jobs::{get_clusters, get_job_by_id, get_job_by_locator, list_jobs};
+use crate::http::handlers::jobs::{
+    get_clusters, get_job_by_id, get_job_by_locator, list_jobs, post_job_action,
+};
 use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
@@ -42,6 +44,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/jobs/{cluster}/{namespace}/{kind}/{name}",
             get(get_job_by_locator),
+        )
+        .route(
+            "/api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}",
+            post(post_job_action),
         )
         .route("/api/jobs/{id}", get(get_job_by_id))
         .route(
@@ -139,6 +145,9 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
         ("GET", Some("/api/clusters")) => "getClusters",
         ("GET", Some("/api/jobs/{id}"))
         | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => "getJob",
+        ("POST", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}")) => {
+            "jobAction"
+        }
         ("GET", Some("/api/jobs/{id}/jobmanager-proxy"))
         | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/"))
         | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/{*path}")) => "jobManagerProxy",
@@ -160,11 +169,12 @@ mod tests {
     use std::fs;
     use std::net::TcpListener as StdTcpListener;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use axum::extract::OriginalUri;
-    use axum::http::{StatusCode, header};
+    use axum::extract::{OriginalUri, Request};
+    use axum::http::{Method, StatusCode, header};
     use axum::response::IntoResponse;
+    use axum::routing::any;
     use axum::{Json, Router};
     use reqwest::{Client, RequestBuilder, redirect::Policy};
     use serde_json::{Value, json};
@@ -618,6 +628,26 @@ mod tests {
         assert!(detail_payload["job"]["details"].get("metadata").is_none());
         assert!(detail_payload["job"]["details"].get("spec").is_none());
         assert!(detail_payload["job"]["details"].get("status").is_none());
+        assert_eq!(detail_payload["job"]["actions"]["cancel"]["enabled"], false);
+        assert_eq!(
+            detail_payload["job"]["actions"]["cancel"]["reason"],
+            "Actions are unavailable in fixture mode"
+        );
+
+        let action_response = client
+            .post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("fixture action response should succeed");
+        assert_eq!(action_response.status(), StatusCode::CONFLICT);
+        let action_payload: Value = action_response
+            .json()
+            .await
+            .expect("fixture action payload should be JSON");
+        assert_eq!(action_payload["error"], "Action unavailable");
 
         let healthz_response = client
             .get(format!("{}/healthz", app.base_url))
@@ -653,11 +683,12 @@ mod tests {
             .json()
             .await
             .expect("metrics payload should be JSON");
-        assert_eq!(metrics_payload["requestsTotal"], 6);
-        assert_eq!(metrics_payload["errorsTotal"], 0);
+        assert_eq!(metrics_payload["requestsTotal"], 7);
+        assert_eq!(metrics_payload["errorsTotal"], 1);
         assert_eq!(
             metrics_payload["routes"],
             json!({
+              "jobAction": 1,
               "getClusters": 1,
               "getJob": 1,
               "healthz": 1,
@@ -863,6 +894,16 @@ mod tests {
             .expect("detail unauthorized response should succeed");
         assert_eq!(detail_response.status(), StatusCode::UNAUTHORIZED);
 
+        let action_response = client
+            .post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("action unauthorized response should succeed");
+        assert_eq!(action_response.status(), StatusCode::UNAUTHORIZED);
+
         let healthz_response = client
             .get(format!("{}/healthz", app.base_url))
             .send()
@@ -880,6 +921,128 @@ mod tests {
         app.shutdown();
         kubernetes.shutdown();
         flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_updates_resource_and_returns_refreshed_job() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream",
+                StatusCode::OK,
+                json!({}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "suspended"}},
+                    "status": {"jobStatus": {"state": "SUSPENDED"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = response
+            .json()
+            .await
+            .expect("action payload should be JSON");
+        assert_eq!(payload["action"], "suspend");
+        assert_eq!(payload["deleted"], false);
+        assert_eq!(payload["job"]["status"], "suspended");
+        assert_eq!(payload["job"]["actions"]["resume"]["enabled"], true);
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_returns_conflict_for_disabled_actions() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkSessionJob",
+                    "metadata": {"name": "settlement-job", "namespace": "analytics"},
+                    "spec": {"job": {"state": "suspended", "jarURI": "local:///example.jar"}},
+                    "status": {"jobStatus": {"state": "SUSPENDED"}}
+                  }]
+                }),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkSessionJob/settlement-job/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Action not allowed");
+        assert_eq!(payload["details"], "Already suspended");
+
+        app.shutdown();
+        kubernetes.shutdown();
     }
 
     #[tokio::test]
@@ -1283,6 +1446,60 @@ mod tests {
         }
     }
 
+    async fn start_stateful_json_server(responses: Vec<MethodJsonResponse>) -> RunningServer {
+        let responses = Arc::new(Mutex::new(responses.into_iter().fold(
+            BTreeMap::<String, Vec<(StatusCode, Value)>>::new(),
+            |mut entries, response| {
+                entries
+                    .entry(response.key())
+                    .or_default()
+                    .push((response.status, response.payload));
+                entries
+            },
+        )));
+        let app = Router::new().fallback(any({
+            let responses = Arc::clone(&responses);
+            move |request: Request| {
+                let responses = Arc::clone(&responses);
+                async move {
+                    let key = format!("{} {}", request.method(), request.uri().path());
+                    let _ = axum::body::to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("request body should read");
+                    let mut responses = responses.lock().expect("responses should lock");
+                    match responses.get_mut(&key).and_then(|values| {
+                        if values.is_empty() {
+                            None
+                        } else {
+                            Some(values.remove(0))
+                        }
+                    }) {
+                        Some((status, payload)) => (status, Json(payload)).into_response(),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("stateful mock server should run");
+        });
+
+        RunningServer {
+            base_url: format!("http://{}", address),
+            session_cookie: None,
+            task,
+        }
+    }
+
     async fn start_mock_http_server(responses: Vec<MockHttpResponse>) -> RunningServer {
         let responses = Arc::new(
             responses
@@ -1487,12 +1704,44 @@ mod tests {
         }
     }
 
+    struct MethodJsonResponse {
+        method: Method,
+        path: String,
+        status: StatusCode,
+        payload: Value,
+    }
+
+    impl MethodJsonResponse {
+        fn new(method: Method, path: &str, status: StatusCode, payload: Value) -> Self {
+            Self {
+                method,
+                path: path.to_owned(),
+                status,
+                payload,
+            }
+        }
+
+        fn key(&self) -> String {
+            format!("{} {}", self.method, self.path)
+        }
+    }
+
     fn load_fixture_jobs() -> Vec<Value> {
         let fixture_path = workspace_root().join("fixtures/jobs.json");
-        let payload: Value = serde_json::from_str(
+        let mut payload: Value = serde_json::from_str(
             &fs::read_to_string(fixture_path).expect("fixture file should be readable"),
         )
         .expect("fixture JSON should parse");
+        if let Some(jobs) = payload["jobs"].as_array_mut() {
+            for job in jobs {
+                for action_name in ["cancel", "suspend", "resume"] {
+                    if let Some(action) = job["actions"].get_mut(action_name) {
+                        action["enabled"] = json!(false);
+                        action["reason"] = json!("Actions are unavailable in fixture mode");
+                    }
+                }
+            }
+        }
         payload["jobs"]
             .as_array()
             .expect("fixture jobs should be an array")

@@ -8,6 +8,8 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+Fixture mode keeps action execution disabled on purpose: the UI still shows the baseline control surface, but `cancel`, `suspend`, and `resume` are non-clickable because there is no live Kubernetes operator target behind the local fixture dataset.
+
 ## Runtime and auth model
 
 - `npm start` delegates to `npm run start:rust`, which runs the supported Rust backend in `apps/api-rs`.
@@ -103,5 +105,6 @@ Kubernetes/Flink upstream calls.
 - The default `npm start` / `npm run dev` path now runs the Rust backend in `apps/api-rs`.
 - `FlinkSessionJob` collection is best-effort; clusters without that CR kind still work.
 - Flink REST enrichment is optional and never blocks job listing.
+- Local fixture mode is still the safest way to exercise the read path; action execution requires a live or mocked Kubernetes API.
 - There is no separate Node backend runtime path anymore.
 - Do not expose `/metrics` on the public ingress; keep it on an internal-only operations path.

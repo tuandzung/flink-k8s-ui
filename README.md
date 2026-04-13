@@ -223,6 +223,7 @@ This performs:
 - `GET /api/clusters` — list distinct cluster names
 - `GET /api/jobs/{id}` — fetch a job by synthetic ID
 - `GET /api/jobs/{cluster}/{namespace}/{kind}/{name}` — fetch a job by locator
+- `POST /api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}` — execute `cancel`, `suspend`, or `resume` for a single operator-managed resource
 - `GET /api/session` — session bootstrap status for the frontend gate
 
 ### Auth/session routes
@@ -411,8 +412,9 @@ Current CI behavior:
 
 ## Known limitations
 
-- read-only dashboard only; no suspend/cancel/savepoint actions
+- single-resource actions only; bulk actions and savepoints are still out of scope
 - local dev defaults to fixture mode rather than a live cluster
+- fixture mode disables action execution even though it still renders baseline action affordances
 - Flink REST enrichment is best-effort and should never block job listing
 - Flink REST enrichment only calls trusted configured origins (`flinkRestBaseUrl` / `FLINK_REST_BASE_URL`) or the server-derived in-cluster `FlinkDeployment` service URL; status-derived URLs are warning-only for enrichment decisions
 - JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in v1

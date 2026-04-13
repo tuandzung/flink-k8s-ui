@@ -1,11 +1,13 @@
-# Flink Job UI v1 Architecture
+# Flink Job UI Architecture
+
+> This document started as the v1 read-only architecture note. It now also captures the v2 baseline single-resource control actions (`cancel`, `suspend`, `resume`) added on top of that foundation.
 
 ## Scope
 
-- read-only dashboard
-- list Flink jobs and status
+- dashboard for listing Flink jobs and status
 - support `FlinkDeployment` and `FlinkSessionJob`
 - rely on Kubernetes operator CRs first, optional Flink REST enrichment second
+- support single-resource `cancel`, `suspend`, and `resume` actions through operator CR semantics
 
 ## Why this shape
 
@@ -20,15 +22,16 @@ The repo was greenfield, so the implementation optimizes for:
 ### Backend
 
 - `apps/api-rs/src/http/router.rs` — HTTP router, metrics, and static asset serving
+- `apps/api-rs/src/http/handlers/jobs.rs` — read + action handlers for job resources
 - `apps/api-rs/src/service/jobs_service.rs` — cached job aggregation
-- `apps/api-rs/src/adapters/k8s.rs` — Kubernetes reads + normalization inputs
+- `apps/api-rs/src/adapters/k8s.rs` — Kubernetes reads + action mutations
 - `apps/api-rs/src/adapters/flink.rs` — optional Flink REST enrichment
 
 ### Frontend
 
 - `apps/web/public/index.html` — shell
-- `apps/web/public/app.js` — fetch + interaction wiring
-- `apps/web/public/render.js` — rendering helpers and filter logic
+- `apps/web/public/app.js` — fetch, action submission, and post-action refresh wiring
+- `apps/web/public/render.js` — rendering helpers, filter logic, and action controls/feedback
 
 ## Data flow
 
@@ -37,6 +40,7 @@ The repo was greenfield, so the implementation optimizes for:
 3. backend normalizes resource status into canonical UI states and may synthesize an in-cluster `FlinkDeployment` JobManager URL (`http://<name>-rest.<namespace>.svc:8081/`) when operator status omits one
 4. backend optionally enriches results from Flink REST
 5. UI renders summary cards, filters, table, and details drawer
+6. Action submissions call the protected locator-based action endpoint and force an immediate refetch so the drawer/table reflect the authoritative post-action state
 
 ## Canonical status vocabulary
 
@@ -47,6 +51,13 @@ The repo was greenfield, so the implementation optimizes for:
 - `unknown`
 
 Raw status is still preserved in the details view for troubleshooting.
+
+## Action semantics
+
+- `suspend` patches the operator-managed resource into a suspended state
+- `resume` is only available for suspended resources
+- `cancel` deletes/removes the operator-managed resource and is terminal
+- unsupported action/state combinations stay disabled in the UI and return `409`-style API responses if called directly
 
 ## Configuration
 
@@ -67,4 +78,4 @@ Raw status is still preserved in the details view for troubleshooting.
 
 - namespace or cluster-level watches instead of polling
 - authorization and identity-aware business logic on top of the session layer
-- control actions like suspend/cancel after read-only v1 is accepted
+- savepoints and richer operator workflows after the baseline action surface is stable

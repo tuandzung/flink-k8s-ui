@@ -266,6 +266,44 @@ tr:hover {
   color: #ffd695;
 }
 
+.job-actions {
+  margin: 18px 0;
+}
+
+.job-action-list {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.job-action-button[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.job-action-cancel {
+  border-color: rgba(214, 69, 69, 0.45);
+}
+
+.feedback-banner {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.feedback-success {
+  color: var(--healthy);
+  background: rgba(31, 157, 106, 0.12);
+  border-color: rgba(31, 157, 106, 0.3);
+}
+
+.feedback-error {
+  color: var(--error);
+  background: rgba(214, 69, 69, 0.12);
+  border-color: rgba(214, 69, 69, 0.3);
+}
+
 pre {
   white-space: pre-wrap;
   word-break: break-word;

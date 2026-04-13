@@ -16,6 +16,14 @@
       "startedAt": "2026-04-01T22:00:00.000Z",
       "nativeUiUrl": "https://flink.example.com/orders-stream/",
       "warnings": [],
+      "actions": {
+        "cancel": { "enabled": true },
+        "suspend": { "enabled": true },
+        "resume": {
+          "enabled": false,
+          "reason": "Resume is only available for suspended resources"
+        }
+      },
       "details": {
         "statusSummary": {
           "jobState": "RUNNING",
@@ -48,6 +56,14 @@
       "warnings": [
         "Flink REST enrichment unavailable: no JobManager URL"
       ],
+      "actions": {
+        "cancel": { "enabled": true },
+        "suspend": { "enabled": true },
+        "resume": {
+          "enabled": false,
+          "reason": "Resume is only available for suspended resources"
+        }
+      },
       "details": {
         "statusSummary": {
           "reconciliationState": "UPGRADING"
@@ -70,6 +86,14 @@
       "startedAt": "2026-03-29T09:00:00.000Z",
       "nativeUiUrl": null,
       "warnings": [],
+      "actions": {
+        "cancel": { "enabled": true },
+        "suspend": {
+          "enabled": false,
+          "reason": "Already suspended"
+        },
+        "resume": { "enabled": true }
+      },
       "details": {
         "statusSummary": {
           "jobState": "SUSPENDED"
@@ -94,6 +118,17 @@
       "warnings": [
         "Restart backoff exceeded on JobManager"
       ],
+      "actions": {
+        "cancel": { "enabled": true },
+        "suspend": {
+          "enabled": false,
+          "reason": "Suspend is only available for active resources"
+        },
+        "resume": {
+          "enabled": false,
+          "reason": "Resume is only available for suspended resources"
+        }
+      },
       "details": {
         "statusSummary": {
           "error": "Restart backoff exceeded on JobManager"

@@ -137,7 +137,7 @@ fn normalize_base(
         .and_then(|value| value_to_string(Some(value))),
     };
 
-    Job {
+    let mut job = Job {
         id: format!("{}:{}:{}:{}", cluster.name, namespace, kind, resource_name),
         cluster: cluster.name.clone(),
         namespace,
@@ -170,11 +170,14 @@ fn normalize_base(
         flink_job_id: None,
         native_ui_url,
         warnings: build_warnings(&status),
+        actions: crate::domain::job::JobActions::default(),
         details: JobDetails {
             status_summary: (!status_summary.is_empty()).then_some(status_summary),
             flink_rest_overview: None,
         },
-    }
+    };
+    job.derive_actions();
+    job
 }
 
 struct StatusInfo {

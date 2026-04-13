@@ -151,9 +151,14 @@ export function jobManagerProxyHref(job) {
   return `/api/jobs/${encodeURIComponent(job.id)}/jobmanager-proxy/`;
 }
 
-export function renderDrawer(job) {
+export function renderDrawer(job, actionState = defaultDrawerActionState()) {
   if (!job) {
     return `
+      ${
+        actionState.status === 'success' && actionState.deleted
+          ? `<div class="feedback-banner feedback-success">${escapeHtml(actionState.message || 'Resource deleted successfully.')}</div>`
+          : ''
+      }
       <p class="muted">Select a job to inspect deployment details and warnings.</p>
     `;
   }
@@ -171,6 +176,8 @@ export function renderDrawer(job) {
       <p><strong>Flink version:</strong> ${job.flinkVersion || 'unknown'}</p>
       <p><strong>Mode:</strong> ${job.deploymentMode || 'unknown'}</p>
       <p><strong>Last update:</strong> ${job.lastUpdatedAt || '—'}</p>
+      ${renderActionFeedback(actionState, job)}
+      ${renderJobActions(job, actionState)}
       ${
         proxyHref
           ? `<p><a href="${proxyHref}" target="_blank" rel="noreferrer">Open JobManager UI</a></p>`
@@ -186,6 +193,63 @@ export function renderDrawer(job) {
       <h3>Status details</h3>
       <pre>${escapeHtml(JSON.stringify(job.details, null, 2))}</pre>
     </div>
+  `;
+}
+
+function renderActionFeedback(actionState, job) {
+  if (!job || actionState.jobId !== job.id) {
+    return '';
+  }
+
+  if (actionState.status === 'success') {
+    return `<div class="feedback-banner feedback-success">${escapeHtml(actionState.message || 'Action completed successfully.')}</div>`;
+  }
+
+  if (actionState.status === 'error') {
+    return `<div class="feedback-banner feedback-error">${escapeHtml(actionState.message || 'Action failed.')}</div>`;
+  }
+
+  return '';
+}
+
+function renderJobActions(job, actionState) {
+  const actions = [
+    ['suspend', 'Suspend', job.actions?.suspend],
+    ['resume', 'Resume', job.actions?.resume],
+    ['cancel', 'Cancel', job.actions?.cancel]
+  ];
+
+  return `
+    <div class="job-actions">
+      <h3>Actions</h3>
+      <div class="job-action-list">
+        ${actions
+          .map(([action, label, state]) => renderJobActionButton(job, action, label, state, actionState))
+          .join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderJobActionButton(job, action, label, state = {}, actionState) {
+  const pending = actionState.status === 'pending' && actionState.jobId === job.id;
+  const enabled = state.enabled === true && !pending;
+  const reason =
+    pending && actionState.action === action
+      ? `Submitting ${label.toLowerCase()}…`
+      : state.reason || '';
+
+  return `
+    <button
+      class="secondary-button job-action-button job-action-${action}"
+      type="button"
+      data-job-id="${escapeHtml(job.id)}"
+      data-job-action="${action}"
+      ${enabled ? '' : 'disabled'}
+      ${reason ? `title="${escapeHtml(reason)}"` : ''}
+    >
+      ${pending && actionState.action === action ? `${label}…` : label}
+    </button>
   `;
 }
 
@@ -282,6 +346,16 @@ function renderSessionAction(session) {
 
 function hasUsableJobManagerUrl(value) {
   return /^https?:\/\//i.test(String(value || ''));
+}
+
+function defaultDrawerActionState() {
+  return {
+    status: 'idle',
+    jobId: null,
+    action: null,
+    message: '',
+    deleted: false
+  };
 }
 
 function escapeHtml(value) {

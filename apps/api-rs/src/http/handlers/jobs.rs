@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -7,7 +8,9 @@ use axum::http::StatusCode;
 use serde::Serialize;
 use tracing::error;
 
-use crate::domain::job::Job;
+use crate::adapters::k8s::apply_job_action;
+use crate::config::ClusterConfig;
+use crate::domain::job::{Job, JobAction};
 use crate::error::UpstreamHttpError;
 use crate::http::handlers::health::utc_now_string;
 use crate::state::AppState;
@@ -42,6 +45,16 @@ pub struct JobResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobActionResponse {
+    action: String,
+    deleted: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job: Option<Job>,
+}
+
+#[derive(Serialize)]
 pub struct ErrorResponse {
     error: String,
     details: Cow<'static, str>,
@@ -51,6 +64,7 @@ const PUBLIC_UPSTREAM_ERROR_DETAILS: &str =
     "The upstream request failed; check server logs for details";
 const PUBLIC_INTERNAL_ERROR_DETAILS: &str =
     "The server could not complete the request; check server logs for details";
+const FIXTURE_MODE_ACTION_DETAILS: &str = "Actions are unavailable in fixture mode";
 
 pub async fn list_jobs(
     State(state): State<AppState>,
@@ -120,6 +134,80 @@ pub async fn get_job_by_locator(
     }
 }
 
+pub async fn post_job_action(
+    State(state): State<AppState>,
+    Path((cluster, namespace, kind, name, action)): Path<(String, String, String, String, String)>,
+) -> Result<Json<JobActionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let action = JobAction::from_str(&action).map_err(|_| invalid_action())?;
+
+    if state.config.fixture_mode {
+        return Err(conflict("Action unavailable", FIXTURE_MODE_ACTION_DETAILS));
+    }
+
+    let job = state
+        .jobs_service
+        .list_jobs(true)
+        .await
+        .map_err(|error| internal_error("Failed to fetch job", error))?
+        .into_iter()
+        .find(|job| {
+            job.cluster == cluster
+                && job.namespace == namespace
+                && job.kind == kind
+                && job.resource_name == name
+        })
+        .ok_or_else(|| not_found("Job not found"))?;
+
+    let action_state = job.actions.state_for(action);
+    if !action_state.enabled {
+        return Err(conflict(
+            "Action not allowed",
+            action_state.reason.clone().unwrap_or_else(|| {
+                "This action is not available for the current resource state".to_owned()
+            }),
+        ));
+    }
+
+    let cluster_config = cluster_config(&state, &cluster).ok_or_else(|| {
+        internal_message(
+            "Failed to execute action",
+            PUBLIC_INTERNAL_ERROR_DETAILS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    apply_job_action(
+        cluster_config,
+        &namespace,
+        &kind,
+        &name,
+        action,
+        state.config.request_timeout_ms,
+    )
+    .await
+    .map_err(|error| internal_error("Failed to execute action", error))?;
+
+    let refreshed_job = state
+        .jobs_service
+        .list_jobs(true)
+        .await
+        .map_err(|error| internal_error("Failed to refresh jobs", error))?
+        .into_iter()
+        .find(|job| {
+            job.cluster == cluster
+                && job.namespace == namespace
+                && job.kind == kind
+                && job.resource_name == name
+        });
+    let deleted = action == JobAction::Cancel && refreshed_job.is_none();
+
+    Ok(Json(JobActionResponse {
+        action: action.as_str().to_owned(),
+        deleted,
+        message: action_message(action, deleted),
+        job: refreshed_job,
+    }))
+}
+
 fn internal_error(message: &str, error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     let status_code = error
         .downcast_ref::<UpstreamHttpError>()
@@ -160,6 +248,52 @@ fn public_error_details(error: &anyhow::Error) -> Cow<'static, str> {
     } else {
         Cow::Borrowed(PUBLIC_INTERNAL_ERROR_DETAILS)
     }
+}
+
+fn conflict(
+    message: &'static str,
+    details: impl Into<Cow<'static, str>>,
+) -> (StatusCode, Json<ErrorResponse>) {
+    internal_message(message, details, StatusCode::CONFLICT)
+}
+
+fn invalid_action() -> (StatusCode, Json<ErrorResponse>) {
+    internal_message(
+        "Invalid action",
+        "Supported actions are cancel, suspend, and resume",
+        StatusCode::BAD_REQUEST,
+    )
+}
+
+fn internal_message(
+    message: &'static str,
+    details: impl Into<Cow<'static, str>>,
+    status: StatusCode,
+) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            error: message.to_owned(),
+            details: details.into(),
+        }),
+    )
+}
+
+fn action_message(action: JobAction, deleted: bool) -> String {
+    match action {
+        JobAction::Cancel if deleted => "Resource deleted successfully".to_owned(),
+        JobAction::Cancel => "Cancel action completed".to_owned(),
+        JobAction::Suspend => "Resource suspended successfully".to_owned(),
+        JobAction::Resume => "Resource resumed successfully".to_owned(),
+    }
+}
+
+fn cluster_config<'a>(state: &'a AppState, cluster_name: &str) -> Option<&'a ClusterConfig> {
+    state
+        .config
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == cluster_name)
 }
 
 fn format_error_chain(error: &anyhow::Error) -> String {
