@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::Serialize;
 use tracing::error;
 
@@ -65,6 +65,7 @@ const PUBLIC_UPSTREAM_ERROR_DETAILS: &str =
 const PUBLIC_INTERNAL_ERROR_DETAILS: &str =
     "The server could not complete the request; check server logs for details";
 const FIXTURE_MODE_ACTION_DETAILS: &str = "Actions are unavailable in fixture mode";
+const ACTION_CSRF_HEADER: &str = "x-csrf-token";
 
 pub async fn list_jobs(
     State(state): State<AppState>,
@@ -136,6 +137,7 @@ pub async fn get_job_by_locator(
 
 pub async fn post_job_action(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((cluster, namespace, kind, name, action)): Path<(String, String, String, String, String)>,
 ) -> Result<Json<JobActionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let action = JobAction::from_str(&action).map_err(|_| invalid_action())?;
@@ -143,6 +145,8 @@ pub async fn post_job_action(
     if state.config.fixture_mode {
         return Err(conflict("Action unavailable", FIXTURE_MODE_ACTION_DETAILS));
     }
+
+    validate_action_csrf(&state, &headers).await?;
 
     let cluster_config = cluster_config(&state, &cluster).ok_or_else(|| {
         internal_message(
@@ -281,6 +285,52 @@ fn cluster_config<'a>(state: &'a AppState, cluster_name: &str) -> Option<&'a Clu
         .clusters
         .iter()
         .find(|cluster| cluster.name == cluster_name)
+}
+
+async fn validate_action_csrf(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let provided_csrf = headers
+        .get(ACTION_CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            internal_message(
+                "Invalid CSRF token",
+                "A valid CSRF token is required for job actions",
+                StatusCode::FORBIDDEN,
+            )
+        })?;
+
+    let session = state
+        .auth
+        .session_from_headers(&state.config, headers)
+        .await
+        .map_err(|_| {
+            internal_message(
+                "Failed to validate session",
+                PUBLIC_INTERNAL_ERROR_DETAILS,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+        .ok_or_else(|| {
+            internal_message(
+                "Missing or expired session",
+                "A valid session is required for job actions",
+                StatusCode::UNAUTHORIZED,
+            )
+        })?;
+
+    if session.csrf_token == provided_csrf {
+        Ok(())
+    } else {
+        Err(internal_message(
+            "Invalid CSRF token",
+            "A valid CSRF token is required for job actions",
+            StatusCode::FORBIDDEN,
+        ))
+    }
 }
 
 fn format_error_chain(error: &anyhow::Error) -> String {

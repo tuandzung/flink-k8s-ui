@@ -250,7 +250,12 @@ async function submitJobAction(job, action) {
   render();
 
   try {
-    const response = await fetch(jobActionHref(job, action), { method: 'POST' });
+    const response = await fetch(jobActionHref(job, action), {
+      method: 'POST',
+      headers: state.session.csrfToken
+        ? { 'x-csrf-token': state.session.csrfToken }
+        : {}
+    });
     const payload = await readJson(response);
 
     if (!response.ok) {

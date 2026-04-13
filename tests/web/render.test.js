@@ -85,6 +85,22 @@ test('renderDrawer shows action feedback and deleted-state success banner', () =
   assert.match(deletedHtml, /Resource deleted successfully/);
 });
 
+test('renderDrawer escapes untrusted job fields in the action UI path', () => {
+  const html = renderDrawer({
+    ...fixture.jobs[0],
+    kind: '<img src=x onerror=alert(1)>',
+    jobName: '<script>alert(1)</script>',
+    resourceName: '<b>orders</b>',
+    cluster: 'demo"><script>alert(2)</script>',
+    namespace: '<svg/onload=alert(3)>',
+    warnings: ['<img src=x onerror=alert(4)>']
+  });
+
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/);
+});
+
 test('jobManagerProxyHref returns a same-domain proxy path for usable URLs only', () => {
   assert.equal(
     jobManagerProxyHref(fixture.jobs[0]),

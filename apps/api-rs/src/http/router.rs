@@ -1086,6 +1086,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_mode_action_route_rejects_missing_csrf_token() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized_without_csrf(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Invalid CSRF token");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_rejects_invalid_csrf_token() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized_without_csrf(
+            &app,
+            client
+                .post(format!(
+                    "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                    app.base_url
+                ))
+                .header("x-csrf-token", "wrong-token"),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Invalid CSRF token");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
     async fn live_mode_serves_shell_assets_without_auth_headers() {
         let flink = start_mock_json_server(vec![(
             "/jobs/overview".to_owned(),
@@ -1405,6 +1497,7 @@ mod tests {
     struct RunningServer {
         base_url: String,
         session_cookie: Option<String>,
+        session_csrf_token: Option<String>,
         task: JoinHandle<()>,
     }
 
@@ -1443,6 +1536,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: session.as_ref().map(|(cookie, _)| cookie.clone()),
+            session_csrf_token: session.as_ref().map(|(_, csrf_token)| csrf_token.clone()),
             task,
         }
     }
@@ -1482,6 +1576,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: None,
+            session_csrf_token: None,
             task,
         }
     }
@@ -1536,6 +1631,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: None,
+            session_csrf_token: None,
             task,
         }
     }
@@ -1584,6 +1680,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: None,
+            session_csrf_token: None,
             task,
         }
     }
@@ -1680,6 +1777,19 @@ mod tests {
     }
 
     fn authorized(app: &RunningServer, request: RequestBuilder) -> RequestBuilder {
+        if let Some(cookie) = &app.session_cookie {
+            let request = request.header(reqwest::header::COOKIE, cookie);
+            if let Some(csrf_token) = &app.session_csrf_token {
+                request.header("x-csrf-token", csrf_token)
+            } else {
+                request
+            }
+        } else {
+            request
+        }
+    }
+
+    fn authorized_without_csrf(app: &RunningServer, request: RequestBuilder) -> RequestBuilder {
         if let Some(cookie) = &app.session_cookie {
             request.header(reqwest::header::COOKIE, cookie)
         } else {

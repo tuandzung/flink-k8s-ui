@@ -1,5 +1,5 @@
 export function statusClass(value) {
-  return `status-badge status-${String(value || 'unknown').toLowerCase()}`;
+  return `status-badge status-${sanitizeClassToken(value)}`;
 }
 
 export function summarizeJobs(jobs) {
@@ -59,7 +59,7 @@ export function renderFilters(jobs, filters) {
         ${values
           .map(
             (value) =>
-              `<option value="${value}" ${filters[key] === value ? 'selected' : ''}>${value}</option>`
+              `<option value="${escapeHtml(value)}" ${filters[key] === value ? 'selected' : ''}>${escapeHtml(value)}</option>`
           )
           .join('')}
       </select>
@@ -72,7 +72,7 @@ export function renderFilters(jobs, filters) {
     ${select('Status', 'status', statuses)}
     <div class="field">
       <label for="search">Search</label>
-      <input id="search" type="search" value="${filters.search || ''}" placeholder="resource or job name" />
+      <input id="search" type="search" value="${escapeHtml(filters.search || '')}" placeholder="resource or job name" />
     </div>
   `;
 }
@@ -125,15 +125,15 @@ export function renderTable(jobs) {
             (job) => `
               <tr>
                 <td>
-                  <button class="row-button" data-job-id="${job.id}">
-                    <strong>${job.jobName}</strong><br />
-                    <span class="muted">${job.resourceName}</span>
+                  <button class="row-button" data-job-id="${escapeHtml(job.id)}">
+                    <strong>${escapeHtml(job.jobName)}</strong><br />
+                    <span class="muted">${escapeHtml(job.resourceName)}</span>
                   </button>
                 </td>
-                <td>${job.cluster}<br /><span class="muted">${job.namespace}</span></td>
-                <td>${job.kind}</td>
-                <td><span class="${statusClass(job.status)}">${job.status}</span></td>
-                <td>${job.lastUpdatedAt ? new Date(job.lastUpdatedAt).toLocaleString() : '—'}</td>
+                <td>${escapeHtml(job.cluster)}<br /><span class="muted">${escapeHtml(job.namespace)}</span></td>
+                <td>${escapeHtml(job.kind)}</td>
+                <td><span class="${statusClass(job.status)}">${escapeHtml(job.status)}</span></td>
+                <td>${escapeHtml(job.lastUpdatedAt ? new Date(job.lastUpdatedAt).toLocaleString() : '—')}</td>
               </tr>
             `
           )
@@ -167,26 +167,26 @@ export function renderDrawer(job, actionState = defaultDrawerActionState()) {
 
   return `
     <div>
-      <p class="eyebrow">${job.kind}</p>
-      <h2>${job.jobName}</h2>
-      <p><span class="${statusClass(job.status)}">${job.status}</span></p>
-      <p><strong>Cluster:</strong> ${job.cluster}</p>
-      <p><strong>Namespace:</strong> ${job.namespace}</p>
-      <p><strong>Resource:</strong> ${job.resourceName}</p>
-      <p><strong>Flink version:</strong> ${job.flinkVersion || 'unknown'}</p>
-      <p><strong>Mode:</strong> ${job.deploymentMode || 'unknown'}</p>
-      <p><strong>Last update:</strong> ${job.lastUpdatedAt || '—'}</p>
+      <p class="eyebrow">${escapeHtml(job.kind)}</p>
+      <h2>${escapeHtml(job.jobName)}</h2>
+      <p><span class="${statusClass(job.status)}">${escapeHtml(job.status)}</span></p>
+      <p><strong>Cluster:</strong> ${escapeHtml(job.cluster)}</p>
+      <p><strong>Namespace:</strong> ${escapeHtml(job.namespace)}</p>
+      <p><strong>Resource:</strong> ${escapeHtml(job.resourceName)}</p>
+      <p><strong>Flink version:</strong> ${escapeHtml(job.flinkVersion || 'unknown')}</p>
+      <p><strong>Mode:</strong> ${escapeHtml(job.deploymentMode || 'unknown')}</p>
+      <p><strong>Last update:</strong> ${escapeHtml(job.lastUpdatedAt || '—')}</p>
       ${renderActionFeedback(actionState, job)}
       ${renderJobActions(job, actionState)}
       ${
         proxyHref
-          ? `<p><a href="${proxyHref}" target="_blank" rel="noreferrer">Open JobManager UI</a></p>`
+          ? `<p><a href="${escapeHtml(proxyHref)}" target="_blank" rel="noreferrer">Open JobManager UI</a></p>`
           : '<p class="muted">No usable JobManager UI URL available.</p>'
       }
       ${
         job.warnings?.length
           ? `<ul class="warning-list">${job.warnings
-              .map((warning) => `<li>${warning}</li>`)
+              .map((warning) => `<li>${escapeHtml(warning)}</li>`)
               .join('')}</ul>`
           : '<p class="muted">No warnings reported.</p>'
       }
@@ -365,4 +365,10 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function sanitizeClassToken(value) {
+  return String(value || 'unknown')
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_-]/g, '-');
 }
