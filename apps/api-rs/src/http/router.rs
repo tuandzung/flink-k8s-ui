@@ -169,7 +169,7 @@ mod tests {
     use std::fs;
     use std::net::TcpListener as StdTcpListener;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use axum::extract::{OriginalUri, Request};
     use axum::http::{Method, StatusCode, header};
@@ -179,6 +179,7 @@ mod tests {
     use reqwest::{Client, RequestBuilder, redirect::Policy};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
 
     use super::build_router;
@@ -1046,6 +1047,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_mode_action_route_returns_not_found_for_unknown_cluster() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/prod/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Cluster not found");
+        assert_eq!(payload["details"], "The specified cluster does not exist");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
     async fn live_mode_serves_shell_assets_without_auth_headers() {
         let flink = start_mock_json_server(vec![(
             "/jobs/overview".to_owned(),
@@ -1466,7 +1506,7 @@ mod tests {
                     let _ = axum::body::to_bytes(request.into_body(), usize::MAX)
                         .await
                         .expect("request body should read");
-                    let mut responses = responses.lock().expect("responses should lock");
+                    let mut responses = responses.lock().await;
                     match responses.get_mut(&key).and_then(|values| {
                         if values.is_empty() {
                             None

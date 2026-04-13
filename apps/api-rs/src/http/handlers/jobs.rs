@@ -144,18 +144,19 @@ pub async fn post_job_action(
         return Err(conflict("Action unavailable", FIXTURE_MODE_ACTION_DETAILS));
     }
 
+    let cluster_config = cluster_config(&state, &cluster).ok_or_else(|| {
+        internal_message(
+            "Cluster not found",
+            "The specified cluster does not exist",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+
     let job = state
         .jobs_service
-        .list_jobs(true)
+        .get_job_by_locator_with_refresh(&cluster, &namespace, &kind, &name, true)
         .await
         .map_err(|error| internal_error("Failed to fetch job", error))?
-        .into_iter()
-        .find(|job| {
-            job.cluster == cluster
-                && job.namespace == namespace
-                && job.kind == kind
-                && job.resource_name == name
-        })
         .ok_or_else(|| not_found("Job not found"))?;
 
     let action_state = job.actions.state_for(action);
@@ -168,13 +169,6 @@ pub async fn post_job_action(
         ));
     }
 
-    let cluster_config = cluster_config(&state, &cluster).ok_or_else(|| {
-        internal_message(
-            "Failed to execute action",
-            PUBLIC_INTERNAL_ERROR_DETAILS,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
     apply_job_action(
         cluster_config,
         &namespace,
@@ -188,16 +182,9 @@ pub async fn post_job_action(
 
     let refreshed_job = state
         .jobs_service
-        .list_jobs(true)
+        .get_job_by_locator_with_refresh(&cluster, &namespace, &kind, &name, true)
         .await
-        .map_err(|error| internal_error("Failed to refresh jobs", error))?
-        .into_iter()
-        .find(|job| {
-            job.cluster == cluster
-                && job.namespace == namespace
-                && job.kind == kind
-                && job.resource_name == name
-        });
+        .map_err(|error| internal_error("Failed to refresh jobs", error))?;
     let deleted = action == JobAction::Cancel && refreshed_job.is_none();
 
     Ok(Json(JobActionResponse {

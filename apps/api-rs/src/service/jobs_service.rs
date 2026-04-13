@@ -65,12 +65,28 @@ impl JobsService {
         kind: &str,
         name: &str,
     ) -> Result<Option<Job>> {
-        Ok(self.list_jobs(false).await?.into_iter().find(|job| {
-            job.cluster == cluster
-                && job.namespace == namespace
-                && job.kind == kind
-                && job.resource_name == name
-        }))
+        self.get_job_by_locator_with_refresh(cluster, namespace, kind, name, false)
+            .await
+    }
+
+    pub async fn get_job_by_locator_with_refresh(
+        &self,
+        cluster: &str,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+        force_refresh: bool,
+    ) -> Result<Option<Job>> {
+        Ok(self
+            .list_jobs(force_refresh)
+            .await?
+            .into_iter()
+            .find(|job| {
+                job.cluster == cluster
+                    && job.namespace == namespace
+                    && job.kind == kind
+                    && job.resource_name == name
+            }))
     }
 
     async fn load_jobs(&self) -> Result<Vec<Job>> {
@@ -170,6 +186,24 @@ mod tests {
         let service = JobsService::new(fixture_config());
         let job = service
             .get_job_by_locator("demo", "analytics", "FlinkDeployment", "orders-stream")
+            .await
+            .expect("job lookup should succeed")
+            .expect("job should exist");
+
+        assert_eq!(job.job_name, "orders-stream");
+    }
+
+    #[tokio::test]
+    async fn jobs_service_can_force_refresh_a_job_by_locator() {
+        let service = JobsService::new(fixture_config());
+        let job = service
+            .get_job_by_locator_with_refresh(
+                "demo",
+                "analytics",
+                "FlinkDeployment",
+                "orders-stream",
+                true,
+            )
             .await
             .expect("job lookup should succeed")
             .expect("job should exist");

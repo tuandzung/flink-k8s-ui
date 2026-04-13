@@ -116,7 +116,7 @@ async function loadJobs(options = {}) {
     return;
   }
 
-  elements.content.innerHTML = '<div class="loading-state">Loading Flink jobs…</div>';
+  replaceHtml(elements.content, '<div class="loading-state">Loading Flink jobs…</div>');
 
   try {
     const response = await fetch('/api/jobs');
@@ -163,12 +163,15 @@ async function loadJobs(options = {}) {
     }
 
     const noAccess = status === 401 || status === 403;
-    elements.content.innerHTML = `
+    replaceHtml(
+      elements.content,
+      `
       <div class="${noAccess ? 'empty-state' : 'error-state'}">
         <strong>${noAccess ? 'No access to Flink resources.' : 'Failed to load jobs.'}</strong>
         <p>${error.message}</p>
       </div>
-    `;
+    `
+    );
   }
 }
 
@@ -177,18 +180,18 @@ function render() {
   elements.refreshButton.disabled = state.session.status === 'loading';
 
   if (!canLoadJobs()) {
-    elements.filters.innerHTML = '';
-    elements.summary.innerHTML = '';
+    replaceHtml(elements.filters, '');
+    replaceHtml(elements.summary, '');
     replaceChildren(elements.drawer, renderSignedOutDrawerNode(state.session));
     replaceChildren(elements.content, renderSessionStateNode(state.session));
     return;
   }
 
   const filteredJobs = filterJobs(state.jobs, state.filters);
-  elements.filters.innerHTML = renderFilters(state.jobs, state.filters);
-  elements.summary.innerHTML = `${renderSummary(filteredJobs)}${renderWarnings(filteredJobs)}`;
-  elements.content.innerHTML = renderTable(filteredJobs);
-  elements.drawer.innerHTML = renderDrawer(state.selectedJob, state.action);
+  replaceHtml(elements.filters, renderFilters(state.jobs, state.filters));
+  replaceHtml(elements.summary, `${renderSummary(filteredJobs)}${renderWarnings(filteredJobs)}`);
+  replaceHtml(elements.content, renderTable(filteredJobs));
+  replaceHtml(elements.drawer, renderDrawer(state.selectedJob, state.action));
 
   for (const key of ['cluster', 'namespace', 'status', 'search']) {
     const field = document.querySelector(`#${key}`);
@@ -205,7 +208,7 @@ function render() {
   document.querySelectorAll('[data-job-id]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedJob = state.jobs.find((job) => job.id === button.dataset.jobId) || null;
-      elements.drawer.innerHTML = renderDrawer(state.selectedJob, state.action);
+      replaceHtml(elements.drawer, renderDrawer(state.selectedJob, state.action));
     });
   });
 
@@ -310,6 +313,14 @@ async function readJson(response) {
 
 function replaceChildren(element, ...nodes) {
   element.replaceChildren(...nodes.filter(Boolean));
+}
+
+function replaceHtml(element, html) {
+  replaceChildren(element, htmlFragment(html));
+}
+
+function htmlFragment(html) {
+  return document.createRange().createContextualFragment(String(html || ''));
 }
 
 function renderSessionChromeNode(session) {

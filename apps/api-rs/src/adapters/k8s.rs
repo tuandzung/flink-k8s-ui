@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::ClusterConfig;
 use crate::domain::job::{Job, JobAction};
@@ -44,14 +44,25 @@ pub async fn apply_job_action(
 
     let request = match action {
         JobAction::Cancel => client.delete(&url),
-        JobAction::Suspend => client
-            .patch(&url)
-            .header("Content-Type", "application/merge-patch+json")
-            .body(r#"{"spec":{"job":{"state":"suspended"}}}"#),
-        JobAction::Resume => client
-            .patch(&url)
-            .header("Content-Type", "application/merge-patch+json")
-            .body(r#"{"spec":{"job":{"state":"running"}}}"#),
+        JobAction::Suspend | JobAction::Resume => {
+            let state = match action {
+                JobAction::Suspend => "suspended",
+                JobAction::Resume => "running",
+                JobAction::Cancel => unreachable!("cancel is handled in a separate match arm"),
+            };
+            let patch_body = json!({
+                "spec": {
+                    "job": {
+                        "state": state,
+                    }
+                }
+            });
+
+            client
+                .patch(&url)
+                .header("Content-Type", "application/merge-patch+json")
+                .json(&patch_body)
+        }
     };
 
     let response = request
@@ -185,7 +196,7 @@ async fn request_json(client: &Client, cluster: &ClusterConfig, path: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use axum::extract::{OriginalUri, Request};
     use axum::http::{Method, StatusCode};
@@ -194,6 +205,7 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::json;
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
 
     fn cluster(base_url: &str) -> ClusterConfig {
@@ -378,7 +390,7 @@ mod tests {
         .await
         .expect("suspend should succeed");
 
-        let captured = recorder.lock().expect("recorder should lock");
+        let captured = recorder.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, Method::PATCH);
         assert_eq!(
@@ -417,7 +429,7 @@ mod tests {
         .await
         .expect("resume should succeed");
 
-        let captured = recorder.lock().expect("recorder should lock");
+        let captured = recorder.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, Method::PATCH);
         assert_eq!(captured[0].2, r#"{"spec":{"job":{"state":"running"}}}"#);
@@ -452,7 +464,7 @@ mod tests {
         .await
         .expect("cancel should succeed");
 
-        let captured = recorder.lock().expect("recorder should lock");
+        let captured = recorder.lock().await;
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, Method::DELETE);
         assert_eq!(captured[0].2, "");
@@ -524,7 +536,7 @@ mod tests {
                     let body = axum::body::to_bytes(request.into_body(), usize::MAX)
                         .await
                         .expect("body should read");
-                    recorder.lock().expect("recorder should lock").push((
+                    recorder.lock().await.push((
                         method.clone(),
                         path.clone(),
                         String::from_utf8(body.to_vec()).expect("body should be utf-8"),

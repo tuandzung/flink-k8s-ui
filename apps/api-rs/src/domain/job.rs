@@ -74,7 +74,7 @@ impl JobActions {
         }
     }
 
-    pub fn disable_all(mut self, reason: &str) -> Self {
+    pub fn disable_all(&mut self, reason: &str) -> &mut Self {
         for state in [&mut self.cancel, &mut self.suspend, &mut self.resume] {
             state.enabled = false;
             state.reason = Some(reason.to_owned());
@@ -122,7 +122,7 @@ impl Job {
     }
 
     pub fn disable_actions(&mut self, reason: &str) {
-        self.actions = self.actions.clone().disable_all(reason);
+        self.actions.disable_all(reason);
     }
 }
 
