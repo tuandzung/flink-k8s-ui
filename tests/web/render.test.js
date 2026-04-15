@@ -48,8 +48,57 @@ test('renderDrawer includes warnings and sanitized status details', () => {
   assert.match(html, /Open JobManager UI/);
   assert.match(html, /Status details/);
   assert.match(html, /&quot;statusSummary&quot;/);
+  assert.match(html, /data-job-action="cancel"/);
+  assert.match(html, /data-job-action="suspend"/);
+  assert.match(html, /data-job-action="resume"/);
   assert.doesNotMatch(html, /"metadata"/);
   assert.doesNotMatch(html, /"spec"/);
+});
+
+test('renderDrawer reflects enabled and disabled action controls', () => {
+  const runningHtml = renderDrawer(fixture.jobs[0]);
+  assert.doesNotMatch(runningHtml, /data-job-action="suspend"[^>]*disabled/);
+  assert.match(runningHtml, /data-job-action="resume"[^>]*disabled/);
+
+  const suspendedHtml = renderDrawer(fixture.jobs[2]);
+  assert.match(suspendedHtml, /data-job-action="suspend"[^>]*disabled/);
+  assert.doesNotMatch(suspendedHtml, /data-job-action="resume"[^>]*disabled/);
+});
+
+test('renderDrawer shows action feedback and deleted-state success banner', () => {
+  const successHtml = renderDrawer(fixture.jobs[0], {
+    status: 'success',
+    jobId: fixture.jobs[0].id,
+    action: 'suspend',
+    message: 'Resource suspended successfully.',
+    deleted: false
+  });
+  assert.match(successHtml, /Resource suspended successfully/);
+
+  const deletedHtml = renderDrawer(null, {
+    status: 'success',
+    jobId: fixture.jobs[0].id,
+    action: 'cancel',
+    message: 'Resource deleted successfully.',
+    deleted: true
+  });
+  assert.match(deletedHtml, /Resource deleted successfully/);
+});
+
+test('renderDrawer escapes untrusted job fields in the action UI path', () => {
+  const html = renderDrawer({
+    ...fixture.jobs[0],
+    kind: '<img src=x onerror=alert(1)>',
+    jobName: '<script>alert(1)</script>',
+    resourceName: '<b>orders</b>',
+    cluster: 'demo"><script>alert(2)</script>',
+    namespace: '<svg/onload=alert(3)>',
+    warnings: ['<img src=x onerror=alert(4)>']
+  });
+
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(4\)&gt;/);
 });
 
 test('jobManagerProxyHref returns a same-domain proxy path for usable URLs only', () => {
@@ -72,7 +121,11 @@ test('renderWarnings highlights partial enrichment state', () => {
   assert.match(html, /partial enrichment warnings/);
 });
 
-test('renderSignedOutShell renders sign-in call to action', () => {
+test('renderSignedOutShell renders v2 sign-in call to action', () => {
+  const defaultHtml = renderSignedOutShell();
+  assert.match(defaultHtml, /Sign in to manage Flink jobs/);
+  assert.match(defaultHtml, /protected cluster status, job details, and action controls/);
+
   const html = renderSignedOutShell({
     loginUrl: '/auth/login',
     title: 'Sign in required',
@@ -86,7 +139,9 @@ test('renderSignedOutShell renders sign-in call to action', () => {
 });
 
 test('renderAuthLoading and renderAuthError expose bootstrap states', () => {
-  assert.match(renderAuthLoading(), /Checking session/);
+  const loadingHtml = renderAuthLoading();
+  assert.match(loadingHtml, /Checking session/);
+  assert.match(loadingHtml, /v2 action controls/);
 
   const errorHtml = renderAuthError({
     error: 'OIDC discovery failed',

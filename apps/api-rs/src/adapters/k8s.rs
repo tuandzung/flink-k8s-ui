@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::config::ClusterConfig;
-use crate::domain::job::Job;
+use crate::domain::job::{Job, JobAction};
 use crate::domain::normalize::normalize_flink_resource;
 use crate::error::UpstreamHttpError;
 
@@ -24,6 +24,71 @@ pub async fn list_cluster_jobs(
         .chain(session_jobs.into_iter())
         .map(|resource| normalize_flink_resource(resource, cluster))
         .collect())
+}
+
+pub async fn apply_job_action(
+    cluster: &ClusterConfig,
+    namespace: &str,
+    kind: &str,
+    name: &str,
+    action: JobAction,
+    request_timeout_ms: u64,
+) -> Result<()> {
+    let client = build_client(cluster, request_timeout_ms)?;
+    let plural = resource_plural(kind)?;
+    let path = format!(
+        "/apis/flink.apache.org/{}/namespaces/{}/{}/{}",
+        cluster.flink_api_version, namespace, plural, name
+    );
+    let url = format!("{}{}", cluster.api_url.trim_end_matches('/'), path);
+
+    let request = match action {
+        JobAction::Cancel => client.delete(&url),
+        JobAction::Suspend | JobAction::Resume => {
+            let state = match action {
+                JobAction::Suspend => "suspended",
+                JobAction::Resume => "running",
+                JobAction::Cancel => unreachable!("cancel is handled in a separate match arm"),
+            };
+            let patch_body = json!({
+                "spec": {
+                    "job": {
+                        "state": state,
+                    }
+                }
+            });
+
+            client
+                .patch(&url)
+                .header("Content-Type", "application/merge-patch+json")
+                .json(&patch_body)
+        }
+    };
+
+    let response = request
+        .header("Accept", "application/json")
+        .bearer_auth(&cluster.bearer_token)
+        .send()
+        .await
+        .with_context(|| format!("failed to {} {}", action.as_str(), path))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if status.is_client_error() || status.is_server_error() {
+        return Err(UpstreamHttpError {
+            status_code: status.as_u16(),
+            message: format!(
+                "Kubernetes API {} for {} {}: {}",
+                status.as_u16(),
+                action.as_str().to_ascii_uppercase(),
+                path,
+                body.chars().take(200).collect::<String>()
+            ),
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 async fn list_resources_for_plural(
@@ -70,6 +135,14 @@ fn build_namespace_paths(cluster: &ClusterConfig, plural: &str) -> Vec<String> {
             )
         })
         .collect()
+}
+
+fn resource_plural(kind: &str) -> Result<&'static str> {
+    match kind {
+        "FlinkDeployment" => Ok("flinkdeployments"),
+        "FlinkSessionJob" => Ok("flinksessionjobs"),
+        _ => anyhow::bail!("unsupported Flink resource kind `{kind}`"),
+    }
 }
 
 fn build_client(cluster: &ClusterConfig, request_timeout_ms: u64) -> Result<Client> {
@@ -125,13 +198,14 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use axum::extract::OriginalUri;
-    use axum::http::StatusCode;
+    use axum::extract::{OriginalUri, Request};
+    use axum::http::{Method, StatusCode};
     use axum::response::IntoResponse;
-    use axum::routing::get;
+    use axum::routing::{any, get};
     use axum::{Json, Router};
     use serde_json::json;
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
 
     fn cluster(base_url: &str) -> ClusterConfig {
@@ -289,6 +363,115 @@ mod tests {
         assert!(!format!("{error:#}").contains("only allowed for localhost or loopback"));
     }
 
+    #[tokio::test]
+    async fn apply_job_action_patches_suspend_state_for_deployments() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let mock = start_recording_server(
+            vec![(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream"
+                    .to_owned(),
+                StatusCode::OK,
+                json!({}),
+            )],
+            Arc::clone(&recorder),
+        )
+        .await;
+        let cluster = cluster(&mock.base_url);
+
+        apply_job_action(
+            &cluster,
+            "analytics",
+            "FlinkDeployment",
+            "orders-stream",
+            JobAction::Suspend,
+            1_000,
+        )
+        .await
+        .expect("suspend should succeed");
+
+        let captured = recorder.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, Method::PATCH);
+        assert_eq!(
+            captured[0].1,
+            "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream"
+        );
+        assert_eq!(captured[0].2, r#"{"spec":{"job":{"state":"suspended"}}}"#);
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn apply_job_action_patches_running_state_for_session_jobs() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let mock = start_recording_server(
+            vec![(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs/settlement-job"
+                    .to_owned(),
+                StatusCode::OK,
+                json!({}),
+            )],
+            Arc::clone(&recorder),
+        )
+        .await;
+        let cluster = cluster(&mock.base_url);
+
+        apply_job_action(
+            &cluster,
+            "analytics",
+            "FlinkSessionJob",
+            "settlement-job",
+            JobAction::Resume,
+            1_000,
+        )
+        .await
+        .expect("resume should succeed");
+
+        let captured = recorder.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, Method::PATCH);
+        assert_eq!(captured[0].2, r#"{"spec":{"job":{"state":"running"}}}"#);
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn apply_job_action_deletes_resources_for_cancel() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let mock = start_recording_server(
+            vec![(
+                Method::DELETE,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream"
+                    .to_owned(),
+                StatusCode::OK,
+                json!({}),
+            )],
+            Arc::clone(&recorder),
+        )
+        .await;
+        let cluster = cluster(&mock.base_url);
+
+        apply_job_action(
+            &cluster,
+            "analytics",
+            "FlinkDeployment",
+            "orders-stream",
+            JobAction::Cancel,
+            1_000,
+        )
+        .await
+        .expect("cancel should succeed");
+
+        let captured = recorder.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, Method::DELETE);
+        assert_eq!(captured[0].2, "");
+
+        mock.shutdown();
+    }
+
     struct MockServer {
         base_url: String,
         task: JoinHandle<()>,
@@ -329,6 +512,59 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("mock server should run");
+        });
+
+        MockServer {
+            base_url: format!("http://{}", address),
+            task,
+        }
+    }
+
+    async fn start_recording_server(
+        responses: Vec<(Method, String, StatusCode, Value)>,
+        recorder: Arc<Mutex<Vec<(Method, String, String)>>>,
+    ) -> MockServer {
+        let responses = Arc::new(responses);
+        let app = Router::new().fallback(any({
+            let responses = Arc::clone(&responses);
+            move |request: Request| {
+                let responses = Arc::clone(&responses);
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_owned();
+                    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read");
+                    recorder.lock().await.push((
+                        method.clone(),
+                        path.clone(),
+                        String::from_utf8(body.to_vec()).expect("body should be utf-8"),
+                    ));
+                    match responses
+                        .iter()
+                        .find(|(candidate_method, candidate_path, _, _)| {
+                            candidate_method == &method && candidate_path == &path
+                        }) {
+                        Some((_, _, status, payload)) => {
+                            (*status, Json(payload.clone())).into_response()
+                        }
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("recording mock server should run");
         });
 
         MockServer {

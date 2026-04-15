@@ -1,47 +1,43 @@
+use std::io::ErrorKind;
+
+use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, get_service, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
-use tower_http::services::ServeFile;
 
 use crate::http::handlers::auth::{callback, login, logout, session_status};
 use crate::http::handlers::health::{healthz, readyz};
 use crate::http::handlers::jobmanager_proxy::{proxy_jobmanager_path, proxy_jobmanager_root};
-use crate::http::handlers::jobs::{get_clusters, get_job_by_id, get_job_by_locator, list_jobs};
+use crate::http::handlers::jobs::{
+    get_clusters, get_job_by_id, get_job_by_locator, list_jobs, post_job_action,
+};
 use crate::state::AppState;
 
+const SHELL_HTML_CACHE_CONTROL: &str = "no-store";
+const VERSIONED_SHELL_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const FAVICON_CACHE_CONTROL: &str = "no-cache";
+
 pub fn build_router(state: AppState) -> Router {
-    let static_dir = state.config.static_dir();
     let public_shell = Router::new()
-        .route_service(
-            "/",
-            get_service(ServeFile::new(state.config.index_html_path())),
-        )
-        .route_service(
-            "/app.js",
-            get_service(ServeFile::new(static_dir.join("app.js"))),
-        )
-        .route_service(
-            "/render.js",
-            get_service(ServeFile::new(static_dir.join("render.js"))),
-        )
-        .route_service(
-            "/styles.css",
-            get_service(ServeFile::new(static_dir.join("styles.css"))),
-        )
-        .route_service(
-            "/favicon.ico",
-            get_service(ServeFile::new(static_dir.join("favicon.ico"))),
-        );
+        .route("/", get(shell_index_html))
+        .route("/app.js", get(shell_app_js))
+        .route("/render.js", get(shell_render_js))
+        .route("/styles.css", get(shell_styles_css))
+        .route("/favicon.ico", get(shell_favicon));
     let protected_api = Router::new()
         .route("/api/jobs", get(list_jobs))
         .route("/api/clusters", get(get_clusters))
         .route(
             "/api/jobs/{cluster}/{namespace}/{kind}/{name}",
             get(get_job_by_locator),
+        )
+        .route(
+            "/api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}",
+            post(post_job_action),
         )
         .route("/api/jobs/{id}", get(get_job_by_id))
         .route(
@@ -70,6 +66,113 @@ pub fn build_router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .layer(from_fn_with_state(state.clone(), track_requests))
         .with_state(state)
+}
+
+async fn shell_index_html(State(state): State<AppState>) -> Response {
+    let template = match tokio::fs::read_to_string(state.config.index_html_path()).await {
+        Ok(template) => template,
+        Err(error) => return file_error_response(error),
+    };
+    let html = render_index_html(&template, &state.shell_asset_version);
+
+    build_static_response(
+        StatusCode::OK,
+        "text/html; charset=utf-8",
+        SHELL_HTML_CACHE_CONTROL,
+        html.into_bytes(),
+    )
+}
+
+async fn shell_app_js(State(state): State<AppState>) -> Response {
+    match tokio::fs::read_to_string(state.config.static_dir().join("app.js")).await {
+        Ok(source) => build_static_response(
+            StatusCode::OK,
+            "text/javascript; charset=utf-8",
+            VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+            rewrite_app_js(&source, &state.shell_asset_version).into_bytes(),
+        ),
+        Err(error) => file_error_response(error),
+    }
+}
+
+async fn shell_render_js(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("render.js"),
+        "text/javascript; charset=utf-8",
+        VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn shell_styles_css(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("styles.css"),
+        "text/css; charset=utf-8",
+        VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn shell_favicon(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("favicon.ico"),
+        "image/x-icon",
+        FAVICON_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn serve_static_asset(
+    path: std::path::PathBuf,
+    content_type: &'static str,
+    cache_control: &'static str,
+) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(contents) => {
+            build_static_response(StatusCode::OK, content_type, cache_control, contents)
+        }
+        Err(error) => file_error_response(error),
+    }
+}
+
+fn render_index_html(template: &str, asset_version: &str) -> String {
+    let styles_href = format!(r#"href="/styles.css?v={asset_version}""#);
+    let script_src = format!(r#"<script type="module" src="/app.js?v={asset_version}"></script>"#);
+
+    template
+        .replace(r#"href="/styles.css""#, &styles_href)
+        .replace(
+            r#"<script type="module" src="/app.js"></script>"#,
+            &script_src,
+        )
+}
+
+fn rewrite_app_js(source: &str, asset_version: &str) -> String {
+    source.replacen("./render.js", &format!("./render.js?v={asset_version}"), 1)
+}
+
+fn build_static_response(
+    status: StatusCode,
+    content_type: &'static str,
+    cache_control: &'static str,
+    body: Vec<u8>,
+) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        Body::from(body),
+    )
+        .into_response()
+}
+
+fn file_error_response(error: std::io::Error) -> Response {
+    match error.kind() {
+        ErrorKind::NotFound => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -139,6 +242,9 @@ fn route_label(method: &str, matched_path: Option<&str>) -> String {
         ("GET", Some("/api/clusters")) => "getClusters",
         ("GET", Some("/api/jobs/{id}"))
         | ("GET", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}")) => "getJob",
+        ("POST", Some("/api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}")) => {
+            "jobAction"
+        }
         ("GET", Some("/api/jobs/{id}/jobmanager-proxy"))
         | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/"))
         | ("GET", Some("/api/jobs/{id}/jobmanager-proxy/{*path}")) => "jobManagerProxy",
@@ -162,13 +268,15 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use axum::extract::OriginalUri;
-    use axum::http::{StatusCode, header};
+    use axum::extract::{OriginalUri, Request};
+    use axum::http::{Method, StatusCode, header};
     use axum::response::IntoResponse;
+    use axum::routing::any;
     use axum::{Json, Router};
     use reqwest::{Client, RequestBuilder, redirect::Policy};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
 
     use super::build_router;
@@ -618,6 +726,26 @@ mod tests {
         assert!(detail_payload["job"]["details"].get("metadata").is_none());
         assert!(detail_payload["job"]["details"].get("spec").is_none());
         assert!(detail_payload["job"]["details"].get("status").is_none());
+        assert_eq!(detail_payload["job"]["actions"]["cancel"]["enabled"], false);
+        assert_eq!(
+            detail_payload["job"]["actions"]["cancel"]["reason"],
+            "Actions are unavailable in fixture mode"
+        );
+
+        let action_response = client
+            .post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("fixture action response should succeed");
+        assert_eq!(action_response.status(), StatusCode::CONFLICT);
+        let action_payload: Value = action_response
+            .json()
+            .await
+            .expect("fixture action payload should be JSON");
+        assert_eq!(action_payload["error"], "Action unavailable");
 
         let healthz_response = client
             .get(format!("{}/healthz", app.base_url))
@@ -653,11 +781,12 @@ mod tests {
             .json()
             .await
             .expect("metrics payload should be JSON");
-        assert_eq!(metrics_payload["requestsTotal"], 6);
-        assert_eq!(metrics_payload["errorsTotal"], 0);
+        assert_eq!(metrics_payload["requestsTotal"], 7);
+        assert_eq!(metrics_payload["errorsTotal"], 1);
         assert_eq!(
             metrics_payload["routes"],
             json!({
+              "jobAction": 1,
               "getClusters": 1,
               "getJob": 1,
               "healthz": 1,
@@ -863,6 +992,16 @@ mod tests {
             .expect("detail unauthorized response should succeed");
         assert_eq!(detail_response.status(), StatusCode::UNAUTHORIZED);
 
+        let action_response = client
+            .post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            ))
+            .send()
+            .await
+            .expect("action unauthorized response should succeed");
+        assert_eq!(action_response.status(), StatusCode::UNAUTHORIZED);
+
         let healthz_response = client
             .get(format!("{}/healthz", app.base_url))
             .send()
@@ -880,6 +1019,343 @@ mod tests {
         app.shutdown();
         kubernetes.shutdown();
         flink.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_updates_resource_and_returns_refreshed_job() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream",
+                StatusCode::OK,
+                json!({}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "suspended"}},
+                    "status": {"jobStatus": {"state": "SUSPENDED"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = response
+            .json()
+            .await
+            .expect("action payload should be JSON");
+        assert_eq!(payload["action"], "suspend");
+        assert_eq!(payload["deleted"], false);
+        assert_eq!(payload["job"]["status"], "suspended");
+        assert_eq!(payload["job"]["actions"]["resume"]["enabled"], true);
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_returns_conflict_for_disabled_actions() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkSessionJob",
+                    "metadata": {"name": "settlement-job", "namespace": "analytics"},
+                    "spec": {"job": {"state": "suspended", "jarURI": "local:///example.jar"}},
+                    "status": {"jobStatus": {"state": "SUSPENDED"}}
+                  }]
+                }),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkSessionJob/settlement-job/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Action not allowed");
+        assert_eq!(payload["details"], "Already suspended");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_resume_allows_suspended_resources_with_missing_jobmanager_signals() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "suspended"}},
+                    "status": {
+                      "jobStatus": {"state": "FINISHED"},
+                      "lifecycleState": "SUSPENDED",
+                      "jobManagerDeploymentStatus": "MISSING",
+                      "reconciliationStatus": {"state": "DEPLOYED"}
+                    }
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream",
+                StatusCode::OK,
+                json!({}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {
+                      "jobStatus": {"state": "RUNNING"},
+                      "lifecycleState": "READY",
+                      "reconciliationStatus": {"state": "READY"}
+                    }
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/resume",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("resume response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = response
+            .json()
+            .await
+            .expect("resume payload should be JSON");
+        assert_eq!(payload["action"], "resume");
+        assert_eq!(payload["deleted"], false);
+        assert_eq!(payload["job"]["status"], "running");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_returns_not_found_for_unknown_cluster() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/prod/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Cluster not found");
+        assert_eq!(payload["details"], "The specified cluster does not exist");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_rejects_missing_csrf_token() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized_without_csrf(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Invalid CSRF token");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
+    async fn live_mode_action_route_rejects_invalid_csrf_token() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {"jobStatus": {"state": "RUNNING"}}
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized_without_csrf(
+            &app,
+            client
+                .post(format!(
+                    "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/suspend",
+                    app.base_url
+                ))
+                .header("x-csrf-token", "wrong-token"),
+        )
+        .send()
+        .await
+        .expect("action response should succeed");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let payload: Value = response.json().await.expect("payload should be JSON");
+        assert_eq!(payload["error"], "Invalid CSRF token");
+
+        app.shutdown();
+        kubernetes.shutdown();
     }
 
     #[tokio::test]
@@ -912,29 +1388,65 @@ mod tests {
             .await
             .expect("page response should succeed");
         assert_eq!(page_response.status(), StatusCode::OK);
+        assert_eq!(
+            page_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::SHELL_HTML_CACHE_CONTROL
+            ))
+        );
         let page_html = page_response.text().await.expect("page HTML should load");
         assert!(page_html.contains("Jobs + Status Dashboard"));
+        let asset_version = extract_version(&page_html, "/app.js?v=");
+        assert!(page_html.contains(&format!("/styles.css?v={asset_version}")));
 
         let app_js_response = client
-            .get(format!("{}/app.js", app.base_url))
+            .get(format!("{}/app.js?v={asset_version}", app.base_url))
             .send()
             .await
             .expect("app.js response should succeed");
         assert_eq!(app_js_response.status(), StatusCode::OK);
+        assert_eq!(
+            app_js_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
         let app_js = app_js_response.text().await.expect("app.js should load");
         assert!(app_js.contains("loadJobs"));
+        assert!(app_js.contains(&format!("./render.js?v={asset_version}")));
 
         let styles_response = client
-            .get(format!("{}/styles.css", app.base_url))
+            .get(format!("{}/styles.css?v={asset_version}", app.base_url))
             .send()
             .await
             .expect("styles.css response should succeed");
         assert_eq!(styles_response.status(), StatusCode::OK);
+        assert_eq!(
+            styles_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
         let styles = styles_response
             .text()
             .await
             .expect("styles.css should load");
         assert!(styles.contains(".page-header"));
+
+        let render_response = client
+            .get(format!("{}/render.js?v={asset_version}", app.base_url))
+            .send()
+            .await
+            .expect("render.js response should succeed");
+        assert_eq!(render_response.status(), StatusCode::OK);
+        assert_eq!(
+            render_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
+        let render_js = render_response.text().await.expect("render.js should load");
+        assert!(render_js.contains("renderTable"));
 
         app.shutdown();
         kubernetes.shutdown();
@@ -1202,6 +1714,7 @@ mod tests {
     struct RunningServer {
         base_url: String,
         session_cookie: Option<String>,
+        session_csrf_token: Option<String>,
         task: JoinHandle<()>,
     }
 
@@ -1240,6 +1753,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: session.as_ref().map(|(cookie, _)| cookie.clone()),
+            session_csrf_token: session.as_ref().map(|(_, csrf_token)| csrf_token.clone()),
             task,
         }
     }
@@ -1279,6 +1793,62 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: None,
+            session_csrf_token: None,
+            task,
+        }
+    }
+
+    async fn start_stateful_json_server(responses: Vec<MethodJsonResponse>) -> RunningServer {
+        let responses = Arc::new(Mutex::new(responses.into_iter().fold(
+            BTreeMap::<String, Vec<(StatusCode, Value)>>::new(),
+            |mut entries, response| {
+                entries
+                    .entry(response.key())
+                    .or_default()
+                    .push((response.status, response.payload));
+                entries
+            },
+        )));
+        let app = Router::new().fallback(any({
+            let responses = Arc::clone(&responses);
+            move |request: Request| {
+                let responses = Arc::clone(&responses);
+                async move {
+                    let key = format!("{} {}", request.method(), request.uri().path());
+                    let _ = axum::body::to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("request body should read");
+                    let mut responses = responses.lock().await;
+                    match responses.get_mut(&key).and_then(|values| {
+                        if values.is_empty() {
+                            None
+                        } else {
+                            Some(values.remove(0))
+                        }
+                    }) {
+                        Some((status, payload)) => (status, Json(payload)).into_response(),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error":"not found"})))
+                            .into_response(),
+                    }
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("stateful mock server should run");
+        });
+
+        RunningServer {
+            base_url: format!("http://{}", address),
+            session_cookie: None,
+            session_csrf_token: None,
             task,
         }
     }
@@ -1327,6 +1897,7 @@ mod tests {
         RunningServer {
             base_url: format!("http://{}", address),
             session_cookie: None,
+            session_csrf_token: None,
             task,
         }
     }
@@ -1424,6 +1995,19 @@ mod tests {
 
     fn authorized(app: &RunningServer, request: RequestBuilder) -> RequestBuilder {
         if let Some(cookie) = &app.session_cookie {
+            let request = request.header(reqwest::header::COOKIE, cookie);
+            if let Some(csrf_token) = &app.session_csrf_token {
+                request.header("x-csrf-token", csrf_token)
+            } else {
+                request
+            }
+        } else {
+            request
+        }
+    }
+
+    fn authorized_without_csrf(app: &RunningServer, request: RequestBuilder) -> RequestBuilder {
+        if let Some(cookie) = &app.session_cookie {
             request.header(reqwest::header::COOKIE, cookie)
         } else {
             request
@@ -1435,6 +2019,18 @@ mod tests {
             .redirect(Policy::none())
             .build()
             .expect("client should build")
+    }
+
+    fn extract_version(body: &str, marker: &str) -> String {
+        let start = body
+            .find(marker)
+            .map(|index| index + marker.len())
+            .expect("marker should exist");
+        let suffix = &body[start..];
+        let end = suffix
+            .find('"')
+            .expect("versioned asset URL should end with quote");
+        suffix[..end].to_owned()
     }
 
     fn unused_local_url() -> String {
@@ -1487,12 +2083,44 @@ mod tests {
         }
     }
 
+    struct MethodJsonResponse {
+        method: Method,
+        path: String,
+        status: StatusCode,
+        payload: Value,
+    }
+
+    impl MethodJsonResponse {
+        fn new(method: Method, path: &str, status: StatusCode, payload: Value) -> Self {
+            Self {
+                method,
+                path: path.to_owned(),
+                status,
+                payload,
+            }
+        }
+
+        fn key(&self) -> String {
+            format!("{} {}", self.method, self.path)
+        }
+    }
+
     fn load_fixture_jobs() -> Vec<Value> {
         let fixture_path = workspace_root().join("fixtures/jobs.json");
-        let payload: Value = serde_json::from_str(
+        let mut payload: Value = serde_json::from_str(
             &fs::read_to_string(fixture_path).expect("fixture file should be readable"),
         )
         .expect("fixture JSON should parse");
+        if let Some(jobs) = payload["jobs"].as_array_mut() {
+            for job in jobs {
+                for action_name in ["cancel", "suspend", "resume"] {
+                    if let Some(action) = job["actions"].get_mut(action_name) {
+                        action["enabled"] = json!(false);
+                        action["reason"] = json!("Actions are unavailable in fixture mode");
+                    }
+                }
+            }
+        }
         payload["jobs"]
             .as_array()
             .expect("fixture jobs should be an array")

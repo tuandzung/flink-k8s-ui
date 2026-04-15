@@ -1,14 +1,15 @@
 # Flink K8s UI
 
-Read-only web UI for viewing Apache Flink jobs running on Kubernetes.
+v2 baseline web UI for viewing and operating Apache Flink jobs running on Kubernetes.
 
-This project serves a lightweight dashboard that aggregates `FlinkDeployment` and `FlinkSessionJob` resources, normalizes their status into a small UI-friendly contract, and optionally enriches jobs from the Flink REST API.
+This project serves a lightweight dashboard that aggregates `FlinkDeployment` and `FlinkSessionJob` resources, normalizes their status into a small UI-friendly contract, supports single-resource `cancel`/`suspend`/`resume` actions, and optionally enriches jobs from the Flink REST API.
 
 ## What this project does
 
 - lists Flink jobs across one or more Kubernetes namespaces
 - supports both `FlinkDeployment` and `FlinkSessionJob`
 - shows normalized status, health, warnings, and job metadata in a simple browser UI
+- supports single-resource `cancel`, `suspend`, and `resume` actions with immediate post-action refresh
 - optionally enriches jobs with Flink REST overview data
 - serves static UI assets and API routes from a single Rust service
 - supports fixture mode for local development without a cluster
@@ -61,7 +62,8 @@ There is **no separate Node backend runtime path** anymore. Node is used for the
    - Kubernetes Flink operator CRs in live mode
 3. The backend normalizes raw operator resources into a typed public job DTO
 4. Optional Flink REST enrichment adds a small overview summary
-5. The UI renders summary cards, a job table, filters, and a details drawer
+5. The UI renders summary cards, a job table, filters, a details drawer, and authenticated action controls
+6. Job actions post back to the Rust service and immediately refetch the authoritative resource state
 
 ### Main backend components
 
@@ -69,15 +71,16 @@ There is **no separate Node backend runtime path** anymore. Node is used for the
 - `apps/api-rs/src/config.rs` — env/config parsing
 - `apps/api-rs/src/http/router.rs` — routes, auth gate, metrics, static serving
 - `apps/api-rs/src/service/jobs_service.rs` — caching + orchestration
-- `apps/api-rs/src/adapters/k8s.rs` — Kubernetes reads
+- `apps/api-rs/src/http/handlers/jobs.rs` — protected list/action handlers
+- `apps/api-rs/src/adapters/k8s.rs` — Kubernetes reads + action mutations
 - `apps/api-rs/src/adapters/flink.rs` — optional Flink REST enrichment
 - `apps/api-rs/src/domain/normalize.rs` — normalization into the public DTO
 
 ### Frontend components
 
 - `apps/web/public/index.html` — page shell
-- `apps/web/public/app.js` — fetch + UI wiring
-- `apps/web/public/render.js` — rendering helpers and filtering logic
+- `apps/web/public/app.js` — auth bootstrap, fetch, action submission, and UI wiring
+- `apps/web/public/render.js` — rendering helpers, filtering logic, and action controls
 - `apps/web/public/styles.css` — styling
 
 ## Prerequisites
@@ -223,6 +226,7 @@ This performs:
 - `GET /api/clusters` — list distinct cluster names
 - `GET /api/jobs/{id}` — fetch a job by synthetic ID
 - `GET /api/jobs/{cluster}/{namespace}/{kind}/{name}` — fetch a job by locator
+- `POST /api/jobs/{cluster}/{namespace}/{kind}/{name}/actions/{action}` — execute `cancel`, `suspend`, or `resume` for a single operator-managed resource
 - `GET /api/session` — session bootstrap status for the frontend gate
 
 ### Auth/session routes
@@ -385,6 +389,7 @@ Example manifests live under:
 - `deploy/api/deployment.yaml`
 - `deploy/api/service.yaml`
 - `deploy/api/ingress.yaml`
+- `deploy/rbac/api-reader.yaml`
 
 The included deployment assumes:
 
@@ -394,7 +399,9 @@ The included deployment assumes:
 - `deploy/api/deployment.yaml` is a **local port-forward example** until you replace `OIDC_EXTERNAL_BASE_URL=http://localhost:3000` and `SESSION_SECURE_COOKIE=false` with the real HTTPS ingress settings
 - `/metrics` should not be publicly exposed without protection
 - same-domain JobManager UI proxying depends on the app pod being able to reach the in-cluster JobManager REST service; when `status.jobManagerUrl` is missing, the app derives `FlinkDeployment` URLs as `http://<name>-rest.<namespace>.svc:8081/`
-- the v1 JobManager proxy stays read-only and does not support websocket/upgrade flows
+- the JobManager proxy remains read-only in the v2 baseline and does not support websocket/upgrade flows
+- action-enabled deployments also need `deploy/rbac/api-reader.yaml`, which now grants `get,list,watch,patch,delete` on `flinkdeployments` and `flinksessionjobs`
+- because the example deployment watches `WATCH_NAMESPACES=analytics,payments`, apply the namespace-scoped RBAC manifest in each watched namespace (or adapt it to your cluster-wide RBAC model)
 
 ## CI
 
@@ -411,17 +418,19 @@ Current CI behavior:
 
 ## Known limitations
 
-- read-only dashboard only; no suspend/cancel/savepoint actions
+- single-resource actions only; bulk actions and savepoints are still out of scope
 - local dev defaults to fixture mode rather than a live cluster
+- fixture mode disables action execution even though it still renders baseline action affordances
 - Flink REST enrichment is best-effort and should never block job listing
 - Flink REST enrichment only calls trusted configured origins (`flinkRestBaseUrl` / `FLINK_REST_BASE_URL`) or the server-derived in-cluster `FlinkDeployment` service URL; status-derived URLs are warning-only for enrichment decisions
-- JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in v1
+- JobManager UI proxying is read-only and best suited for in-cluster or otherwise app-reachable JobManager URLs; websocket/upgrade flows are not supported in the v2 baseline
 - `FlinkSessionJob` collection is also best-effort
 - production access control depends on correct ingress/reverse-proxy configuration
 
 ## Additional docs
 
-- `docs/architecture/flink-job-ui-v1.md`
+- `docs/architecture/flink-job-ui-v2.md`
+- `docs/architecture/flink-job-ui-v1.md` (historical v1 note)
 - `docs/ops/local-dev.md`
 
 ## License

@@ -25,7 +25,14 @@ const state = {
     search: ''
   },
   selectedJob: null,
-  session: { ...DEFAULT_SESSION }
+  session: { ...DEFAULT_SESSION },
+  action: {
+    status: 'idle',
+    jobId: null,
+    action: null,
+    message: '',
+    deleted: false
+  }
 };
 
 const elements = {
@@ -103,13 +110,13 @@ async function bootstrapSession() {
   }
 }
 
-async function loadJobs() {
+async function loadJobs(options = {}) {
   if (!canLoadJobs()) {
     render();
     return;
   }
 
-  elements.content.innerHTML = '<div class="loading-state">Loading Flink jobs…</div>';
+  replaceHtml(elements.content, '<div class="loading-state">Loading Flink jobs…</div>');
 
   try {
     const response = await fetch('/api/jobs');
@@ -123,11 +130,18 @@ async function loadJobs() {
     }
 
     state.jobs = payload.jobs;
+    const deletedSelectedJobId = options.deletedSelectedJobId || null;
     if (!state.selectedJob && state.jobs[0]) {
       state.selectedJob = state.jobs[0];
     } else if (state.selectedJob) {
-      state.selectedJob =
-        state.jobs.find((job) => job.id === state.selectedJob.id) || state.jobs[0] || null;
+      const refreshedSelection = state.jobs.find((job) => job.id === state.selectedJob.id);
+      if (refreshedSelection) {
+        state.selectedJob = refreshedSelection;
+      } else if (deletedSelectedJobId && deletedSelectedJobId === state.selectedJob.id) {
+        state.selectedJob = null;
+      } else {
+        state.selectedJob = state.jobs[0] || null;
+      }
     }
 
     render();
@@ -149,12 +163,15 @@ async function loadJobs() {
     }
 
     const noAccess = status === 401 || status === 403;
-    elements.content.innerHTML = `
+    replaceHtml(
+      elements.content,
+      `
       <div class="${noAccess ? 'empty-state' : 'error-state'}">
         <strong>${noAccess ? 'No access to Flink resources.' : 'Failed to load jobs.'}</strong>
         <p>${error.message}</p>
       </div>
-    `;
+    `
+    );
   }
 }
 
@@ -163,18 +180,18 @@ function render() {
   elements.refreshButton.disabled = state.session.status === 'loading';
 
   if (!canLoadJobs()) {
-    elements.filters.innerHTML = '';
-    elements.summary.innerHTML = '';
+    replaceHtml(elements.filters, '');
+    replaceHtml(elements.summary, '');
     replaceChildren(elements.drawer, renderSignedOutDrawerNode(state.session));
     replaceChildren(elements.content, renderSessionStateNode(state.session));
     return;
   }
 
   const filteredJobs = filterJobs(state.jobs, state.filters);
-  elements.filters.innerHTML = renderFilters(state.jobs, state.filters);
-  elements.summary.innerHTML = `${renderSummary(filteredJobs)}${renderWarnings(filteredJobs)}`;
-  elements.content.innerHTML = renderTable(filteredJobs);
-  elements.drawer.innerHTML = renderDrawer(state.selectedJob);
+  replaceHtml(elements.filters, renderFilters(state.jobs, state.filters));
+  replaceHtml(elements.summary, `${renderSummary(filteredJobs)}${renderWarnings(filteredJobs)}`);
+  replaceHtml(elements.content, renderTable(filteredJobs));
+  replaceHtml(elements.drawer, renderDrawer(state.selectedJob, state.action));
 
   for (const key of ['cluster', 'namespace', 'status', 'search']) {
     const field = document.querySelector(`#${key}`);
@@ -191,7 +208,17 @@ function render() {
   document.querySelectorAll('[data-job-id]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedJob = state.jobs.find((job) => job.id === button.dataset.jobId) || null;
-      elements.drawer.innerHTML = renderDrawer(state.selectedJob);
+      replaceHtml(elements.drawer, renderDrawer(state.selectedJob, state.action));
+    });
+  });
+
+  document.querySelectorAll('[data-job-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const job = state.jobs.find((candidate) => candidate.id === button.dataset.jobId);
+      if (!job) {
+        return;
+      }
+      submitJobAction(job, button.dataset.jobAction);
     });
   });
 }
@@ -200,16 +227,56 @@ function canLoadJobs() {
   return state.session.authenticated || state.session.status === 'legacy';
 }
 
-function renderSignedOutDrawer(session) {
-  if (session.status === 'loading') {
-    return '<p class="muted">Waiting for session bootstrap before loading dashboard details.</p>';
-  }
+async function submitJobAction(job, action) {
+  state.action = {
+    status: 'pending',
+    jobId: job.id,
+    action,
+    message: '',
+    deleted: false
+  };
+  render();
 
-  if (session.status === 'error') {
-    return '<p class="muted">Retry authentication to continue to the protected dashboard.</p>';
-  }
+  try {
+    const response = await fetch(jobActionHref(job, action), {
+      method: 'POST',
+      headers: state.session.csrfToken
+        ? { 'x-csrf-token': state.session.csrfToken }
+        : {}
+    });
+    const payload = await readJson(response);
 
-  return '<p class="muted">Sign in to inspect deployment details, warnings, and cluster-specific job status.</p>';
+    if (!response.ok) {
+      const error = new Error(payload.details || payload.error || 'Action failed.');
+      error.status = response.status;
+      throw error;
+    }
+
+    state.action = {
+      status: 'success',
+      jobId: job.id,
+      action,
+      message: payload.message || 'Action completed successfully.',
+      deleted: payload.deleted === true
+    };
+
+    await loadJobs({
+      deletedSelectedJobId: payload.deleted === true ? job.id : null
+    });
+  } catch (error) {
+    state.action = {
+      status: 'error',
+      jobId: job.id,
+      action,
+      message: error instanceof Error ? error.message : 'Action failed.',
+      deleted: false
+    };
+    render();
+  }
+}
+
+function jobActionHref(job, action) {
+  return `/api/jobs/${encodeURIComponent(job.cluster)}/${encodeURIComponent(job.namespace)}/${encodeURIComponent(job.kind)}/${encodeURIComponent(job.resourceName)}/actions/${encodeURIComponent(action)}`;
 }
 
 function normalizeSessionPayload(payload) {
@@ -241,6 +308,14 @@ function replaceChildren(element, ...nodes) {
   element.replaceChildren(...nodes.filter(Boolean));
 }
 
+function replaceHtml(element, html) {
+  replaceChildren(element, htmlFragment(html));
+}
+
+function htmlFragment(html) {
+  return document.createRange().createContextualFragment(String(html || ''));
+}
+
 function renderSessionChromeNode(session) {
   const wrapper = document.createDocumentFragment();
   const chip = document.createElement('div');
@@ -262,7 +337,7 @@ function renderSessionChromeNode(session) {
       ? session.user?.email || 'Session active'
       : session.status === 'loading'
         ? 'Loading authentication status…'
-        : 'Sign in to view protected job data';
+        : 'Sign in to view protected job data and action controls';
 
   chip.append(badge, detail);
   wrapper.append(chip);
@@ -321,12 +396,12 @@ function renderSignedOutDrawerNode(session) {
   }
 
   if (session.status === 'error') {
-    paragraph.textContent = 'Retry authentication to continue to the protected dashboard.';
+    paragraph.textContent = 'Retry authentication to continue to the protected v2 dashboard.';
     return paragraph;
   }
 
   paragraph.textContent =
-    'Sign in to inspect deployment details, warnings, and cluster-specific job status.';
+    'Sign in to inspect deployment details, warnings, and single-resource v2 job actions.';
   return paragraph;
 }
 
@@ -352,7 +427,7 @@ function renderSessionStateNode(session) {
     eyebrow.textContent = 'Authentication';
     title.textContent = 'Checking session…';
     message.textContent =
-      'We’re verifying whether you already have an active session before loading Flink job data.';
+      'We’re verifying whether you already have an active session before loading Flink job data and v2 action controls.';
   } else if (session.status === 'error') {
     eyebrow.textContent = 'Authentication error';
     title.textContent = 'We could not verify your session';
@@ -365,10 +440,10 @@ function renderSessionStateNode(session) {
     actions.append(retryLink);
   } else {
     eyebrow.textContent = 'Authentication required';
-    title.textContent = session.title || 'Sign in to view Flink jobs';
+    title.textContent = session.title || 'Sign in to manage Flink jobs';
     message.textContent =
       session.message ||
-      'This dashboard only loads cluster and job details after the server confirms an authenticated session.';
+      'This dashboard only loads protected cluster status, job details, and action controls after the server confirms an authenticated session.';
 
     const signInLink = document.createElement('a');
     signInLink.className = 'primary-button';

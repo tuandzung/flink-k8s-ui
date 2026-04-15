@@ -478,6 +478,7 @@ mod tests {
             flink_job_id: None,
             native_ui_url,
             warnings: Vec::new(),
+            actions: crate::domain::job::JobActions::for_status("running"),
             details: JobDetails::default(),
         }
     }

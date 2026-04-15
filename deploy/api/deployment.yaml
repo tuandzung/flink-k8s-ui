@@ -65,6 +65,8 @@ spec:
             - name: TRUST_PROXY_HEADERS
               value: "true"
             - name: WATCH_NAMESPACES
+              # Apply deploy/rbac/api-reader.yaml in each watched namespace so the
+              # service account can list and mutate Flink resources there.
               value: "analytics,payments"
           # When running in-cluster with the default K8S_* / service-account discovery
           # path, the app can synthesize a FlinkDeployment JobManager URL as
