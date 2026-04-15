@@ -1,11 +1,13 @@
+use std::io::ErrorKind;
+
+use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, get_service, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
-use tower_http::services::ServeFile;
 
 use crate::http::handlers::auth::{callback, login, logout, session_status};
 use crate::http::handlers::health::{healthz, readyz};
@@ -15,29 +17,17 @@ use crate::http::handlers::jobs::{
 };
 use crate::state::AppState;
 
+const SHELL_HTML_CACHE_CONTROL: &str = "no-store";
+const VERSIONED_SHELL_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const FAVICON_CACHE_CONTROL: &str = "no-cache";
+
 pub fn build_router(state: AppState) -> Router {
-    let static_dir = state.config.static_dir();
     let public_shell = Router::new()
-        .route_service(
-            "/",
-            get_service(ServeFile::new(state.config.index_html_path())),
-        )
-        .route_service(
-            "/app.js",
-            get_service(ServeFile::new(static_dir.join("app.js"))),
-        )
-        .route_service(
-            "/render.js",
-            get_service(ServeFile::new(static_dir.join("render.js"))),
-        )
-        .route_service(
-            "/styles.css",
-            get_service(ServeFile::new(static_dir.join("styles.css"))),
-        )
-        .route_service(
-            "/favicon.ico",
-            get_service(ServeFile::new(static_dir.join("favicon.ico"))),
-        );
+        .route("/", get(shell_index_html))
+        .route("/app.js", get(shell_app_js))
+        .route("/render.js", get(shell_render_js))
+        .route("/styles.css", get(shell_styles_css))
+        .route("/favicon.ico", get(shell_favicon));
     let protected_api = Router::new()
         .route("/api/jobs", get(list_jobs))
         .route("/api/clusters", get(get_clusters))
@@ -76,6 +66,113 @@ pub fn build_router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .layer(from_fn_with_state(state.clone(), track_requests))
         .with_state(state)
+}
+
+async fn shell_index_html(State(state): State<AppState>) -> Response {
+    let template = match tokio::fs::read_to_string(state.config.index_html_path()).await {
+        Ok(template) => template,
+        Err(error) => return file_error_response(error),
+    };
+    let html = render_index_html(&template, &state.shell_asset_version);
+
+    build_static_response(
+        StatusCode::OK,
+        "text/html; charset=utf-8",
+        SHELL_HTML_CACHE_CONTROL,
+        html.into_bytes(),
+    )
+}
+
+async fn shell_app_js(State(state): State<AppState>) -> Response {
+    match tokio::fs::read_to_string(state.config.static_dir().join("app.js")).await {
+        Ok(source) => build_static_response(
+            StatusCode::OK,
+            "text/javascript; charset=utf-8",
+            VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+            rewrite_app_js(&source, &state.shell_asset_version).into_bytes(),
+        ),
+        Err(error) => file_error_response(error),
+    }
+}
+
+async fn shell_render_js(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("render.js"),
+        "text/javascript; charset=utf-8",
+        VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn shell_styles_css(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("styles.css"),
+        "text/css; charset=utf-8",
+        VERSIONED_SHELL_ASSET_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn shell_favicon(State(state): State<AppState>) -> Response {
+    serve_static_asset(
+        state.config.static_dir().join("favicon.ico"),
+        "image/x-icon",
+        FAVICON_CACHE_CONTROL,
+    )
+    .await
+}
+
+async fn serve_static_asset(
+    path: std::path::PathBuf,
+    content_type: &'static str,
+    cache_control: &'static str,
+) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(contents) => {
+            build_static_response(StatusCode::OK, content_type, cache_control, contents)
+        }
+        Err(error) => file_error_response(error),
+    }
+}
+
+fn render_index_html(template: &str, asset_version: &str) -> String {
+    let styles_href = format!(r#"href="/styles.css?v={asset_version}""#);
+    let script_src = format!(r#"<script type="module" src="/app.js?v={asset_version}"></script>"#);
+
+    template
+        .replace(r#"href="/styles.css""#, &styles_href)
+        .replace(
+            r#"<script type="module" src="/app.js"></script>"#,
+            &script_src,
+        )
+}
+
+fn rewrite_app_js(source: &str, asset_version: &str) -> String {
+    source.replacen("./render.js", &format!("./render.js?v={asset_version}"), 1)
+}
+
+fn build_static_response(
+    status: StatusCode,
+    content_type: &'static str,
+    cache_control: &'static str,
+    body: Vec<u8>,
+) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        Body::from(body),
+    )
+        .into_response()
+}
+
+fn file_error_response(error: std::io::Error) -> Response {
+    match error.kind() {
+        ErrorKind::NotFound => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -1047,6 +1144,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_mode_resume_allows_suspended_resources_with_missing_jobmanager_signals() {
+        let kubernetes = start_stateful_json_server(vec![
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "suspended"}},
+                    "status": {
+                      "jobStatus": {"state": "FINISHED"},
+                      "lifecycleState": "SUSPENDED",
+                      "jobManagerDeploymentStatus": "MISSING",
+                      "reconciliationStatus": {"state": "DEPLOYED"}
+                    }
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+            MethodJsonResponse::new(
+                Method::PATCH,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments/orders-stream",
+                StatusCode::OK,
+                json!({}),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinkdeployments",
+                StatusCode::OK,
+                json!({
+                  "items": [{
+                    "kind": "FlinkDeployment",
+                    "metadata": {"name": "orders-stream", "namespace": "analytics"},
+                    "spec": {"job": {"name": "orders-stream", "state": "running"}},
+                    "status": {
+                      "jobStatus": {"state": "RUNNING"},
+                      "lifecycleState": "READY",
+                      "reconciliationStatus": {"state": "READY"}
+                    }
+                  }]
+                }),
+            ),
+            MethodJsonResponse::new(
+                Method::GET,
+                "/apis/flink.apache.org/v1beta1/namespaces/analytics/flinksessionjobs",
+                StatusCode::OK,
+                json!({"items":[]}),
+            ),
+        ])
+        .await;
+        let app = start_app(live_config(&kubernetes.base_url, None)).await;
+        let client = Client::new();
+
+        let response = authorized(
+            &app,
+            client.post(format!(
+                "{}/api/jobs/demo/analytics/FlinkDeployment/orders-stream/actions/resume",
+                app.base_url
+            )),
+        )
+        .send()
+        .await
+        .expect("resume response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = response
+            .json()
+            .await
+            .expect("resume payload should be JSON");
+        assert_eq!(payload["action"], "resume");
+        assert_eq!(payload["deleted"], false);
+        assert_eq!(payload["job"]["status"], "running");
+
+        app.shutdown();
+        kubernetes.shutdown();
+    }
+
+    #[tokio::test]
     async fn live_mode_action_route_returns_not_found_for_unknown_cluster() {
         let kubernetes = start_stateful_json_server(vec![
             MethodJsonResponse::new(
@@ -1207,29 +1388,65 @@ mod tests {
             .await
             .expect("page response should succeed");
         assert_eq!(page_response.status(), StatusCode::OK);
+        assert_eq!(
+            page_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::SHELL_HTML_CACHE_CONTROL
+            ))
+        );
         let page_html = page_response.text().await.expect("page HTML should load");
         assert!(page_html.contains("Jobs + Status Dashboard"));
+        let asset_version = extract_version(&page_html, "/app.js?v=");
+        assert!(page_html.contains(&format!("/styles.css?v={asset_version}")));
 
         let app_js_response = client
-            .get(format!("{}/app.js", app.base_url))
+            .get(format!("{}/app.js?v={asset_version}", app.base_url))
             .send()
             .await
             .expect("app.js response should succeed");
         assert_eq!(app_js_response.status(), StatusCode::OK);
+        assert_eq!(
+            app_js_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
         let app_js = app_js_response.text().await.expect("app.js should load");
         assert!(app_js.contains("loadJobs"));
+        assert!(app_js.contains(&format!("./render.js?v={asset_version}")));
 
         let styles_response = client
-            .get(format!("{}/styles.css", app.base_url))
+            .get(format!("{}/styles.css?v={asset_version}", app.base_url))
             .send()
             .await
             .expect("styles.css response should succeed");
         assert_eq!(styles_response.status(), StatusCode::OK);
+        assert_eq!(
+            styles_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
         let styles = styles_response
             .text()
             .await
             .expect("styles.css should load");
         assert!(styles.contains(".page-header"));
+
+        let render_response = client
+            .get(format!("{}/render.js?v={asset_version}", app.base_url))
+            .send()
+            .await
+            .expect("render.js response should succeed");
+        assert_eq!(render_response.status(), StatusCode::OK);
+        assert_eq!(
+            render_response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static(
+                super::VERSIONED_SHELL_ASSET_CACHE_CONTROL
+            ))
+        );
+        let render_js = render_response.text().await.expect("render.js should load");
+        assert!(render_js.contains("renderTable"));
 
         app.shutdown();
         kubernetes.shutdown();
@@ -1802,6 +2019,18 @@ mod tests {
             .redirect(Policy::none())
             .build()
             .expect("client should build")
+    }
+
+    fn extract_version(body: &str, marker: &str) -> String {
+        let start = body
+            .find(marker)
+            .map(|index| index + marker.len())
+            .expect("marker should exist");
+        let suffix = &body[start..];
+        let end = suffix
+            .find('"')
+            .expect("versioned asset URL should end with quote");
+        suffix[..end].to_owned()
     }
 
     fn unused_local_url() -> String {

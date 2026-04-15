@@ -198,6 +198,18 @@ fn canonicalize_status(raw_values: Vec<String>) -> StatusInfo {
         };
     }
 
+    // Operator-managed suspends intentionally tear down the running job and its
+    // JobManager. That can surface transient/expected `FINISHED` or `MISSING`
+    // markers alongside an explicit suspended desired/lifecycle state, but the
+    // resource is still resumable and should be treated as suspended.
+    if normalized.contains("suspend") {
+        return StatusInfo {
+            status: "suspended".to_owned(),
+            health: "warning".to_owned(),
+            raw_status: raw,
+        };
+    }
+
     if ["error", "fail", "missing"]
         .iter()
         .any(|needle| normalized.contains(needle))
@@ -205,14 +217,6 @@ fn canonicalize_status(raw_values: Vec<String>) -> StatusInfo {
         return StatusInfo {
             status: "failed".to_owned(),
             health: "error".to_owned(),
-            raw_status: raw,
-        };
-    }
-
-    if normalized.contains("suspend") {
-        return StatusInfo {
-            status: "suspended".to_owned(),
-            health: "warning".to_owned(),
             raw_status: raw,
         };
     }
@@ -464,6 +468,63 @@ mod tests {
             Some("SUSPENDED")
         );
         assert!(normalized.native_ui_url.is_none());
+    }
+
+    #[test]
+    fn normalize_flink_deployment_keeps_suspended_status_when_jobmanager_is_missing() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "basic-example",
+                "namespace": "flink"
+            },
+            "spec": {
+                "job": {
+                    "name": "basic-example",
+                    "state": "suspended"
+                }
+            },
+            "status": {
+                "jobStatus": { "state": "FINISHED" },
+                "lifecycleState": "SUSPENDED",
+                "jobManagerDeploymentStatus": "MISSING",
+                "reconciliationStatus": { "state": "DEPLOYED" }
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &cluster());
+
+        assert_eq!(normalized.status, "suspended");
+        assert_eq!(normalized.health, "warning");
+        assert_eq!(normalized.actions.suspend.enabled, false);
+        assert_eq!(normalized.actions.resume.enabled, true);
+    }
+
+    #[test]
+    fn normalize_flink_deployment_still_marks_unsuspended_missing_state_as_failed() {
+        let resource = json!({
+            "kind": "FlinkDeployment",
+            "metadata": {
+                "name": "broken-example",
+                "namespace": "flink"
+            },
+            "spec": {
+                "job": {
+                    "name": "broken-example",
+                    "state": "running"
+                }
+            },
+            "status": {
+                "jobStatus": { "state": "FINISHED" },
+                "jobManagerDeploymentStatus": "MISSING",
+                "reconciliationStatus": { "state": "DEPLOYED" }
+            }
+        });
+
+        let normalized = normalize_flink_deployment(resource, &cluster());
+
+        assert_eq!(normalized.status, "failed");
+        assert_eq!(normalized.actions.resume.enabled, false);
     }
 
     #[test]
