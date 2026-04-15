@@ -121,7 +121,11 @@ test('renderWarnings highlights partial enrichment state', () => {
   assert.match(html, /partial enrichment warnings/);
 });
 
-test('renderSignedOutShell renders sign-in call to action', () => {
+test('renderSignedOutShell renders v2 sign-in call to action', () => {
+  const defaultHtml = renderSignedOutShell();
+  assert.match(defaultHtml, /Sign in to manage Flink jobs/);
+  assert.match(defaultHtml, /protected cluster status, job details, and action controls/);
+
   const html = renderSignedOutShell({
     loginUrl: '/auth/login',
     title: 'Sign in required',
@@ -135,7 +139,9 @@ test('renderSignedOutShell renders sign-in call to action', () => {
 });
 
 test('renderAuthLoading and renderAuthError expose bootstrap states', () => {
-  assert.match(renderAuthLoading(), /Checking session/);
+  const loadingHtml = renderAuthLoading();
+  assert.match(loadingHtml, /Checking session/);
+  assert.match(loadingHtml, /v2 action controls/);
 
   const errorHtml = renderAuthError({
     error: 'OIDC discovery failed',

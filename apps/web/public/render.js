@@ -266,7 +266,7 @@ export function renderSessionChrome(session) {
       ? session.user?.email || 'Session active'
       : session.status === 'loading'
         ? 'Loading authentication status…'
-        : 'Sign in to view protected job data';
+        : 'Sign in to view protected job data and action controls';
 
   return `
     <div class="session-chip">
@@ -284,16 +284,16 @@ export function renderAuthLoading() {
     <div class="auth-card">
       <p class="eyebrow">Authentication</p>
       <h2>Checking session…</h2>
-      <p class="muted">We’re verifying whether you already have an active session before loading Flink job data.</p>
+      <p class="muted">We’re verifying whether you already have an active session before loading Flink job data and v2 action controls.</p>
     </div>
   `;
 }
 
 export function renderSignedOutShell(session = {}) {
-  const title = session.title || 'Sign in to view Flink jobs';
+  const title = session.title || 'Sign in to manage Flink jobs';
   const message =
     session.message ||
-    'This dashboard only loads cluster and job details after the server confirms an authenticated session.';
+    'This dashboard only loads protected cluster status, job details, and action controls after the server confirms an authenticated session.';
   const loginUrl = session.loginUrl || '/auth/login';
 
   return `

@@ -227,18 +227,6 @@ function canLoadJobs() {
   return state.session.authenticated || state.session.status === 'legacy';
 }
 
-function renderSignedOutDrawer(session) {
-  if (session.status === 'loading') {
-    return '<p class="muted">Waiting for session bootstrap before loading dashboard details.</p>';
-  }
-
-  if (session.status === 'error') {
-    return '<p class="muted">Retry authentication to continue to the protected dashboard.</p>';
-  }
-
-  return '<p class="muted">Sign in to inspect deployment details, warnings, and cluster-specific job status.</p>';
-}
-
 async function submitJobAction(job, action) {
   state.action = {
     status: 'pending',
@@ -349,7 +337,7 @@ function renderSessionChromeNode(session) {
       ? session.user?.email || 'Session active'
       : session.status === 'loading'
         ? 'Loading authentication status…'
-        : 'Sign in to view protected job data';
+        : 'Sign in to view protected job data and action controls';
 
   chip.append(badge, detail);
   wrapper.append(chip);
@@ -408,12 +396,12 @@ function renderSignedOutDrawerNode(session) {
   }
 
   if (session.status === 'error') {
-    paragraph.textContent = 'Retry authentication to continue to the protected dashboard.';
+    paragraph.textContent = 'Retry authentication to continue to the protected v2 dashboard.';
     return paragraph;
   }
 
   paragraph.textContent =
-    'Sign in to inspect deployment details, warnings, and cluster-specific job status.';
+    'Sign in to inspect deployment details, warnings, and single-resource v2 job actions.';
   return paragraph;
 }
 
@@ -439,7 +427,7 @@ function renderSessionStateNode(session) {
     eyebrow.textContent = 'Authentication';
     title.textContent = 'Checking session…';
     message.textContent =
-      'We’re verifying whether you already have an active session before loading Flink job data.';
+      'We’re verifying whether you already have an active session before loading Flink job data and v2 action controls.';
   } else if (session.status === 'error') {
     eyebrow.textContent = 'Authentication error';
     title.textContent = 'We could not verify your session';
@@ -452,10 +440,10 @@ function renderSessionStateNode(session) {
     actions.append(retryLink);
   } else {
     eyebrow.textContent = 'Authentication required';
-    title.textContent = session.title || 'Sign in to view Flink jobs';
+    title.textContent = session.title || 'Sign in to manage Flink jobs';
     message.textContent =
       session.message ||
-      'This dashboard only loads cluster and job details after the server confirms an authenticated session.';
+      'This dashboard only loads protected cluster status, job details, and action controls after the server confirms an authenticated session.';
 
     const signInLink = document.createElement('a');
     signInLink.className = 'primary-button';
