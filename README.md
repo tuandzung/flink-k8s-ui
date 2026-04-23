@@ -49,6 +49,7 @@ There is **no separate Node backend runtime path** anymore. Node is used for the
 ├── docs/                # Architecture and local development docs
 ├── fixtures/            # Fixture-mode sample payloads
 ├── scripts/             # Build and smoke-test scripts
+├── tests/e2e/           # Node-driven API contract regression tests
 └── tests/web/           # Frontend render tests
 ```
 
@@ -168,7 +169,7 @@ Delegates to:
 npm run start:rust
 ```
 
-### Frontend tests
+### Node test suite
 
 ```bash
 npm test
@@ -178,7 +179,13 @@ Runs:
 
 ```bash
 node --test tests/web/*.test.js
+node tests/e2e/apiContract.test.js
 ```
+
+Coverage includes:
+
+- frontend render tests under `tests/web/`
+- API contract regression tests under `tests/e2e/` that boot the Rust runtime and verify auth gating, SSRF rejection, sanitized errors, and TLS guardrails
 
 ### Backend tests
 
@@ -208,7 +215,7 @@ npm run ci:smoke
 This performs:
 
 1. Rust tests
-2. frontend tests
+2. Node test suite (render + API contract e2e)
 3. Docker image build
 4. fixture-mode container startup
 5. HTTP smoke checks against the running container

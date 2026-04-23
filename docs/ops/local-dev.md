@@ -17,6 +17,7 @@ Fixture mode keeps action execution disabled on purpose: the UI still shows the 
 - Live-mode traffic uses app-owned OIDC login plus a same-origin session; the signed-out shell remains public while `/api/*` stays session-gated.
 - Set a canonical external base URL and callback path so `/auth/login` and `/auth/callback` stay correct behind the public host.
 - `/metrics` is an operations endpoint and should stay on a separate internal-only service or scrape path.
+- Node remains the test harness layer; `npm test` now runs both frontend render tests and Node-driven API contract e2e checks against the Rust runtime.
 
 ## Run tests
 
@@ -26,7 +27,7 @@ npm test
 ```
 
 - `cargo test --manifest-path apps/api-rs/Cargo.toml` runs backend tests.
-- `npm test` runs frontend render tests.
+- `npm test` runs frontend render tests plus API contract e2e coverage from `tests/e2e/apiContract.test.js`.
 
 ## Build
 
