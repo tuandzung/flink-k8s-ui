@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Run a comprehensive code review
+description: "[OMX] Run a comprehensive code review"
 ---
 
 # Code Review Skill
